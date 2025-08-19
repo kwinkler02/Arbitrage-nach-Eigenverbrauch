@@ -17,7 +17,7 @@
 #   • BESS-Leistung: 0 ≤ ch,dis ≤ P_max (zusätzlich zum Sperr-Flag)
 #   • SoC-Dynamik:   soc_extra[t] = soc_extra[t−1] + (η_ch·ch − dis/η_dis)·Δt
 #   • SoC-Grenze:    0 ≤ soc_extra ≤ (E_max − SoC_baseline)
-#   • Optional:      Jahres‑Zyklenlimit (nur Zusatz-Entladung):  Σ_year(dis·Δt)/E_max ≤ Cap
+#   • Optional:      Jahres‑Zyklenlimit (GESAMT: Baseline + Zusatz):  Σ_year((e_dis_base + dis·Δt))/E_max ≤ Cap
 #   • Zielfunktion:  ∑ ((Preis−Fee_sell)·E_dis − (Preis+Fee_buy)·E_ch)/1000
 #
 #   → Szenario A: mit Sperren (Slots mit BESS_busy sind gesperrt)
@@ -107,7 +107,7 @@ with cp6:
 
 cp7, cp8, cp9 = st.columns(3)
 with cp7:
-    cycles_cap = st.number_input("Max. Vollzyklen/Jahr (nur Zusatz) [#]", min_value=0.0, value=0.0, step=0.5, help="0 = keine Begrenzung")
+    cycles_cap = st.number_input("Max. Gesamt-Vollzyklen/Jahr [#]", min_value=0.0, value=0.0, step=0.5, help="0 = keine Begrenzung; gilt für Baseline + Zusatz") [#]", min_value=0.0, value=0.0, step=0.5, help="0 = keine Begrenzung")
 with cp8:
     fees = st.number_input("Gebühren [€/MWh] (Kauf/Verkauf)", min_value=0.0, value=0.0, step=0.1)
 with cp9:
@@ -182,6 +182,19 @@ if over.any():
 DF["e_dis_base_kwh"] = np.maximum(DF["bess_busy_kw"], 0.0) * dt_h
 DF["e_ch_base_kwh"]  = np.maximum(-DF["bess_busy_kw"], 0.0) * dt_h
 
+# Vorab-Check: überschreitet die Baseline alleine schon das Zyklenlimit?
+if cycles_cap and cycles_cap > 0 and E_max > 0:
+    if "ts" in DF.columns and DF["ts"].notna().all():
+        base_cycles_year = (DF.assign(year=DF["ts"].dt.year)
+                              .groupby("year")["e_dis_base_kwh"].sum()) / E_max
+        exceeded = base_cycles_year[base_cycles_year > cycles_cap]
+        if not exceeded.empty:
+            st.warning("Zyklenlimit bereits durch Baseline überschritten in Jahren: " + ", ".join(str(int(y)) for y in exceeded.index) + ". Die Optimierung hat dort keinen zusätzlichen Spielraum.")
+    else:
+        base_cycles_total = DF["e_dis_base_kwh"].sum() / E_max
+        if base_cycles_total > cycles_cap:
+            st.warning("Zyklenlimit bereits durch Baseline überschritten (ohne Jahresgruppierung). Die Optimierung hat keinen zusätzlichen Spielraum.")
+
 # ---------------------- Optimierer ----------------------
 from collections import defaultdict
 
@@ -230,19 +243,19 @@ def optimize(df: pd.DataFrame,
         base_net = float(df.loc[i, "netload_base_kw"]) + float(df.loc[i, "bess_busy_kw"])  # kW
         # −P_conn ≤ base_net + (dis − ch) ≤ P_conn
         m += base_net + (dis[i] - ch[i]) <= P_conn
-        m += -base_net - (dis[i] - ch[i]) <= P_conn
-
-    # Zyklenlimit (pro Kalenderjahr, falls Zeit vorhanden)
+        m += -base_net - (dis[i] - ch[i]) <= P_conn    # Zyklenlimit (pro Kalenderjahr, falls Zeit vorhanden) — **GESAMT** (Baseline + Zusatz)
     if cycles_cap and cycles_cap > 0 and ("ts" in df.columns) and (df["ts"].notna().all()) and E_max > 0:
         idx_by_year = defaultdict(list)
         years = df["ts"].dt.year.to_list()
         for i, y in enumerate(years):
             idx_by_year[y].append(i)
         for y, idxs in idx_by_year.items():
-            m += pulp.lpSum(dis[i] for i in idxs) * dt_h <= cycles_cap * E_max
+            base_e_dis_y = float(df.iloc[idxs]["e_dis_base_kwh"].sum())  # kWh
+            m += pulp.lpSum(dis[i] for i in idxs) * dt_h + base_e_dis_y <= cycles_cap * E_max
     elif cycles_cap and cycles_cap > 0 and E_max > 0:
         # Fallback ohne Zeit: über gesamten Horizont begrenzen
-        m += pulp.lpSum(dis[i] for i in range(n)) * dt_h <= cycles_cap * E_max
+        base_total = float(df["e_dis_base_kwh"].sum())
+        m += pulp.lpSum(dis[i] for i in range(n)) * dt_h + base_total <= cycles_cap * E_max
 
     if fix_final:
         m += soc[n-1] == soc0_extra_kwh
