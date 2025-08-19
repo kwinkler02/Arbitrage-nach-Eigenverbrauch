@@ -3,4 +3,4 @@ pandas
 numpy
 pulp
 openpyxl
-matplotlib
+altair>=4.2,<6
