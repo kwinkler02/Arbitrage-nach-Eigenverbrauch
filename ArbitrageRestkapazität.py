@@ -117,8 +117,7 @@ with cp8:
 with cp9:
     busy_eps = st.number_input("Sperr-Schwelle |BESS_busy_kW| > ε", min_value=0.0, value=0.0, step=0.1)
 
-# Zusätzliche Option: In Szenario B Zyklen exakt auf Cap fixieren
-fix_cycles_B = st.checkbox("B (frei): Gesamt-Vollzyklen = Cap (Gleichheits-Nebenbedingung)", value=True)
+# In Szenario B werden die Gesamt‑Vollzyklen immer genau auf den Cap gesetzt (Gleichheits‑Constraint).
 
 eta_rt  = rte_pct/100.0
 eta_ch  = eta_rt ** 0.5
@@ -318,7 +317,7 @@ res_A = optimize(DF.copy(), E_max, P_max, P_conn, eta_ch, eta_dis, dt_h,
 # B: frei (Sperren ignorieren)
 res_B = optimize(DF.copy(), E_max, P_max, P_conn, eta_ch, eta_dis, dt_h,
                  soc0_extra_kwh, fix_final, fee_buy, fee_sell, cycles_cap,
-                 ignore_busy=True, cycles_include_base=False, cycles_as_equality=fix_cycles_B)
+                 ignore_busy=True, cycles_include_base=False, cycles_as_equality=True)
 
 if res_A is None or res_B is None:
     st.stop()
@@ -329,7 +328,7 @@ revB = res_B["revenue_eur"].sum()
 
 # Gesamt‑Vollzyklen: A = Baseline + Zusatz; B = Zusatz (frei) oder = Cap, wenn Gleichheit aktiv
 cycles_total_A = (DF["e_dis_base_kwh"].sum() + res_A["e_dis_kwh"].sum())/E_max if E_max>0 else np.nan
-if fix_cycles_B and cycles_cap and cycles_cap > 0 and E_max > 0:
+if cycles_cap and cycles_cap > 0 and E_max > 0:
     cycles_total_B = cycles_cap
 else:
     cycles_total_B = (res_B["e_dis_kwh"].sum())/E_max if E_max>0 else np.nan
