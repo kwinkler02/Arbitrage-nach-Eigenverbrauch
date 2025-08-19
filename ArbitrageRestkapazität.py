@@ -117,6 +117,9 @@ with cp8:
 with cp9:
     busy_eps = st.number_input("Sperr-Schwelle |BESS_busy_kW| > ε", min_value=0.0, value=0.0, step=0.1)
 
+# Zusätzliche Option: In Szenario B Zyklen exakt auf Cap fixieren
+fix_cycles_B = st.checkbox("B (frei): Gesamt-Vollzyklen = Cap (Gleichheits-Nebenbedingung)", value=True)
+
 eta_rt  = rte_pct/100.0
 eta_ch  = eta_rt ** 0.5
 eta_dis = eta_rt ** 0.5
@@ -210,7 +213,9 @@ def optimize(df: pd.DataFrame,
              fix_final: bool,
              fee_buy: float, fee_sell: float,
              cycles_cap: float,
-             ignore_busy: bool = False) -> Optional[pd.DataFrame]:
+             ignore_busy: bool = False,
+             cycles_include_base: bool = True,
+             cycles_as_equality: bool = False) -> Optional[pd.DataFrame]:
     if pulp is None:
         st.error("PuLP fehlt: pip install pulp (und ggf. coinor-cbc)")
         return None
@@ -247,8 +252,29 @@ def optimize(df: pd.DataFrame,
         base_net = float(df.loc[i, "netload_base_kw"]) + float(df.loc[i, "bess_busy_kw"])  # kW
         # −P_conn ≤ base_net + (dis − ch) ≤ P_conn
         m += base_net + (dis[i] - ch[i]) <= P_conn
-        m += -base_net - (dis[i] - ch[i]) <= P_conn    # Zyklenlimit (pro Kalenderjahr, falls Zeit vorhanden) — **GESAMT** (Baseline + Zusatz)
+        m += -base_net - (dis[i] - ch[i]) <= P_conn
+
+    # Zyklenlimit (pro Kalenderjahr, falls Zeit vorhanden)
     if cycles_cap and cycles_cap > 0 and ("ts" in df.columns) and (df["ts"].notna().all()) and E_max > 0:
+        idx_by_year = defaultdict(list)
+        years = df["ts"].dt.year.to_list()
+        for i, y in enumerate(years):
+            idx_by_year[y].append(i)
+        for y, idxs in idx_by_year.items():
+            base_e_dis_y = float(df.iloc[idxs]["e_dis_base_kwh"].sum()) if cycles_include_base else 0.0
+            if cycles_as_equality:
+                m += pulp.lpSum(dis[i] for i in idxs) * dt_h + base_e_dis_y == cycles_cap * E_max
+            else:
+                m += pulp.lpSum(dis[i] for i in idxs) * dt_h + base_e_dis_y <= cycles_cap * E_max
+    elif cycles_cap and cycles_cap > 0 and E_max > 0:
+        # Fallback ohne Zeit: über gesamten Horizont begrenzen
+        base_total = float(df["e_dis_base_kwh"].sum()) if cycles_include_base else 0.0
+        if cycles_as_equality:
+            m += pulp.lpSum(dis[i] for i in range(n)) * dt_h + base_total == cycles_cap * E_max
+        else:
+            m += pulp.lpSum(dis[i] for i in range(n)) * dt_h + base_total <= cycles_cap * E_max
+
+    if fix_final:
         idx_by_year = defaultdict(list)
         years = df["ts"].dt.year.to_list()
         for i, y in enumerate(years):
@@ -291,7 +317,8 @@ res_A = optimize(DF.copy(), E_max, P_max, P_conn, eta_ch, eta_dis, dt_h,
                  soc0_extra_kwh, fix_final, fee_buy, fee_sell, cycles_cap, ignore_busy=False)
 # B: frei (Sperren ignorieren)
 res_B = optimize(DF.copy(), E_max, P_max, P_conn, eta_ch, eta_dis, dt_h,
-                 soc0_extra_kwh, fix_final, fee_buy, fee_sell, cycles_cap, ignore_busy=True)
+                 soc0_extra_kwh, fix_final, fee_buy, fee_sell, cycles_cap,
+                 ignore_busy=True, cycles_include_base=False, cycles_as_equality=fix_cycles_B)
 
 if res_A is None or res_B is None:
     st.stop()
@@ -300,9 +327,12 @@ if res_A is None or res_B is None:
 revA = res_A["revenue_eur"].sum()
 revB = res_B["revenue_eur"].sum()
 
-# Gesamt‑Vollzyklen: Baseline‑Entladung + Zusatz (A), bzw. nur Optimierung (B)
+# Gesamt‑Vollzyklen: A = Baseline + Zusatz; B = Zusatz (frei) oder = Cap, wenn Gleichheit aktiv
 cycles_total_A = (DF["e_dis_base_kwh"].sum() + res_A["e_dis_kwh"].sum())/E_max if E_max>0 else np.nan
-cycles_total_B = (res_B["e_dis_kwh"].sum())/E_max if E_max>0 else np.nan
+if fix_cycles_B and cycles_cap and cycles_cap > 0 and E_max > 0:
+    cycles_total_B = cycles_cap
+else:
+    cycles_total_B = (res_B["e_dis_kwh"].sum())/E_max if E_max>0 else np.nan
 
 c1,c2,c3 = st.columns(3)
 with c1:
@@ -316,6 +346,7 @@ c4,c5 = st.columns(2)
 with c4:
     st.metric("A: Gesamt‑Vollzyklen [#]", f"{cycles_total_A:,.1f}")
 with c5:
+    st.metric("B: Gesamt‑Vollzyklen [#]", f"{cycles_total_B:,.1f}")
     st.metric("B: Gesamt‑Vollzyklen [#]", f"{cycles_total_B:,.1f}")
 
 # ---------------------- Plots (Ausschnitt) ----------------------
