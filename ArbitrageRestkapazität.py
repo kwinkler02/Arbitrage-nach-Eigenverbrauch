@@ -178,6 +178,10 @@ over = (DF["netload_base_kw"] + DF["bess_busy_kw"]).abs() > P_conn + 1e-9
 if over.any():
     st.warning("Warnung: In manchen Slots überschreitet (Netload_base + BESS_busy) bereits den Netzanschluss. Die Optimierung kann hier keine zusätzliche Leistung mehr zuweisen.")
 
+# Baseline-Energie (aus belegter BESS-Leistung):
+DF["e_dis_base_kwh"] = np.maximum(DF["bess_busy_kw"], 0.0) * dt_h
+DF["e_ch_base_kwh"]  = np.maximum(-DF["bess_busy_kw"], 0.0) * dt_h
+
 # ---------------------- Optimierer ----------------------
 from collections import defaultdict
 
@@ -276,13 +280,12 @@ if res_A is None or res_B is None:
     st.stop()
 
 # ---------------------- KPIs ----------------------
-def kpis(df):
-    rev = df["revenue_eur"].sum()
-    zyk = df["e_dis_kwh"].sum()/E_max if E_max>0 else np.nan  # zusätzliche Vollzyklen
-    return rev, zyk
+revA = res_A["revenue_eur"].sum()
+revB = res_B["revenue_eur"].sum()
 
-revA, cycA = kpis(res_A)
-revB, cycB = kpis(res_B)
+# Gesamt‑Vollzyklen: Baseline‑Entladung + Zusatz (A), bzw. nur Optimierung (B)
+cycles_total_A = (DF["e_dis_base_kwh"].sum() + res_A["e_dis_kwh"].sum())/E_max if E_max>0 else np.nan
+cycles_total_B = (res_B["e_dis_kwh"].sum())/E_max if E_max>0 else np.nan
 
 c1,c2,c3 = st.columns(3)
 with c1:
@@ -294,9 +297,9 @@ with c3:
 
 c4,c5 = st.columns(2)
 with c4:
-    st.metric("A: Zusatz‑Vollzyklen [#]", f"{cycA:,.1f}")
+    st.metric("A: Gesamt‑Vollzyklen [#]", f"{cycles_total_A:,.1f}")
 with c5:
-    st.metric("B: Zusatz‑Vollzyklen [#]", f"{cycB:,.1f}")
+    st.metric("B: Gesamt‑Vollzyklen [#]", f"{cycles_total_B:,.1f}")
 
 # ---------------------- Plots (Ausschnitt) ----------------------
 import altair as alt
@@ -332,7 +335,7 @@ st.altair_chart(chart_soc, use_container_width=True)
 # ---------------------- Export ----------------------
 # Zeitachse möglichst mitgeben
 join_cols = [c for c in ["ts"] if c in DF.columns]
-base_out = DF[join_cols + ["soc_base_kwh","netload_base_kw","bess_busy_kw","busy","price_eur_per_mwh"]].copy()
+base_out = DF[join_cols + ["soc_base_kwh","netload_base_kw","bess_busy_kw","busy","price_eur_per_mwh","e_dis_base_kwh","e_ch_base_kwh"]].copy()
 
 out = base_out.merge(
     res_A[[c for c in ["ts"] if c in res_A.columns] + ["p_ch_kw","p_dis_kw","soc_extra_kwh","soc_total_kwh","e_ch_kwh","e_dis_kwh","revenue_eur"]]
@@ -356,10 +359,10 @@ else:
 kpi_df = pd.DataFrame({
     "Kennzahl": [
         "Erlös A [€]","Erlös B [€]","Delta B−A [€]",
-        "A: Zusatz‑Vollzyklen [#]","B: Zusatz‑Vollzyklen [#]",
+        "A: Gesamt‑Vollzyklen [#]","B: Gesamt‑Vollzyklen [#]",
         "RTE [%]","P_max [kW]","E_max [kWh]","P_conn [kW]","Busy‑ε [kW]"
     ],
-    "Wert": [round(revA,2), round(revB,2), round(revB-revA,2), round(cycA,2), round(cycB,2), rte_pct, P_max, E_max, P_conn, busy_eps]
+    "Wert": [round(revA,2), round(revB,2), round(revB-revA,2), round(cycles_total_A,2), round(cycles_total_B,2), rte_pct, P_max, E_max, P_conn, busy_eps]
 })
 
 bio = BytesIO()
