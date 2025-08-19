@@ -139,7 +139,7 @@ colp7, colp8 = st.columns(2)
 with colp7:
     cycles_cap = st.number_input("Max. Vollzyklen/Jahr (EFC)", min_value=0.0, value=0.0, step=0.5, help="0 = keine Begrenzung")
 with colp8:
-    st.write("")", min_value=0.0, value=0.0, step=0.1)
+    st.write("")
 
 # ---------------------- Datenaufbereitung ----------------------
 # Basistabelle
@@ -207,26 +207,43 @@ def optimize_with_baseline(df: pd.DataFrame,
                            fee_buy: float = 0.0,
                            fee_sell: float = 0.0,
                            cycles_cap: float = 0.0) -> Optional[pd.DataFrame]:
+    """Optimiert zusätzliche Arbitrage *oberhalb* der Baseline (Eigenverbrauch).
+    Erwartet Spalten: ts, soc_base_kwh, p_ch_base_kw, p_dis_base_kw, price_eur_per_mwh.
+    """
+    if pulp is None:
+        st.error("PuLP ist nicht installiert. Bitte 'pip install pulp' ausführen und App neu starten.")
+        return None
+
+    n = len(df)
+    m = pulp.LpProblem("BESS_Arbitrage_with_baseline", pulp.LpMaximize)
+
+    ch = pulp.LpVariable.dicts("ch_extra_kw", range(n), lowBound=0)
+    dis = pulp.LpVariable.dicts("dis_extra_kw", range(n), lowBound=0)
+    soc = pulp.LpVariable.dicts("soc_extra_kwh", range(n), lowBound=0)
+
+    # Zielfunktion
+    revenue_terms = []
+    for t in range(n):
         p = float(df.loc[t, "price_eur_per_mwh"])  # €/MWh
-        revenue_terms.append( ((p - fee_sell) * dis[t] - (p + fee_buy) * ch[t]) * (dt_h / 1000.0) )
+        revenue_terms.append(((p - fee_sell) * dis[t] - (p + fee_buy) * ch[t]) * (dt_h / 1000.0))
     m += pulp.lpSum(revenue_terms)
 
-    # Nebenbedingungen
-    # SoC-Entwicklung für den *zusätzlichen* SoC oberhalb Baseline
+    # SoC-Dynamik (nur extra-SoC über Baseline)
     m += soc[0] == soc0_extra_kwh + (eta_ch * ch[0] - (dis[0] / eta_dis)) * dt_h
     for t in range(1, n):
         m += soc[t] == soc[t-1] + (eta_ch * ch[t] - (dis[t] / eta_dis)) * dt_h
 
-    # SoC darf die Headroom-Grenze nicht überschreiten: soc_extra <= E_max - soc_base
+    # Headroom: soc_extra <= E_max - soc_base
     for t in range(n):
-        m += soc[t] <= max(0.0, E_max - float(df.loc[t, "soc_base_kwh"]))
+        headroom = max(0.0, E_max - float(df.loc[t, "soc_base_kwh"]))
+        m += soc[t] <= headroom
 
-    # Lade-/Entladeleistung begrenzen: baseline + extra <= P_max
+    # Leistung: baseline + extra <= P_max
     for t in range(n):
         m += ch[t] <= max(0.0, P_max - float(df.loc[t, "p_ch_base_kw"]))
         m += dis[t] <= max(0.0, P_max - float(df.loc[t, "p_dis_base_kw"]))
 
-    # Zyklenlimit pro Kalenderjahr (EFC): (Baseline-Entladung + Extra-Entladung) / E_max <= cycles_cap
+    # Jahres-Zyklenlimit (EFC)
     if cycles_cap and cycles_cap > 0 and E_max > 0:
         years = df["ts"].dt.year.to_list()
         from collections import defaultdict
@@ -234,18 +251,14 @@ def optimize_with_baseline(df: pd.DataFrame,
         for i, y in enumerate(years):
             idx_by_year[y].append(i)
         for y, idxs in idx_by_year.items():
-            # Baseline-Entladeenergie dieses Jahres (kWh)
             base_e_dis_y = float(df.iloc[idxs]["p_dis_base_kw"].sum()) * dt_h
-            # Extra-Entladung dieses Jahres (kWh)
             m += pulp.lpSum([dis[i] for i in idxs]) * dt_h + base_e_dis_y <= cycles_cap * E_max
 
-    # Finaler SoC gleich initial? → soc_extra[T-1] = soc0_extra
     if fix_final:
         m += soc[n-1] == soc0_extra_kwh
 
-    # Lösen
+    # Solve
     m.solve(pulp.PULP_CBC_CMD(msg=False))
-
     if pulp.LpStatus[m.status] != "Optimal":
         st.error(f"Optimierung A (mit Baseline) nicht optimal: {pulp.LpStatus[m.status]}")
         return None
@@ -255,17 +268,14 @@ def optimize_with_baseline(df: pd.DataFrame,
     out["p_dis_extra_kw"] = [pulp.value(dis[t]) for t in range(n)]
     out["soc_extra_kwh"]  = [pulp.value(soc[t]) for t in range(n)]
 
-    # Resultierende SoC/Leistungen gesamt (Baseline + Extra)
-    out["soc_total_kwh"]   = out["soc_base_kwh"] + out["soc_extra_kwh"]
-    out["p_ch_total_kw"]   = out["p_ch_base_kw"] + out["p_ch_extra_kw"]
-    out["p_dis_total_kw"]  = out["p_dis_base_kw"] + out["p_dis_extra_kw"]
+    out["soc_total_kwh"]  = out["soc_base_kwh"] + out["soc_extra_kwh"]
+    out["p_ch_total_kw"]  = out["p_ch_base_kw"] + out["p_ch_extra_kw"]
+    out["p_dis_total_kw"] = out["p_dis_base_kw"] + out["p_dis_extra_kw"]
 
-    # Energiemengen je Intervall (kWh)
-    out["e_ch_extra_kwh"]  = out["p_ch_extra_kw"]  * dt_h
+    out["e_ch_extra_kwh"]  = out["p_ch_extra_kw"] * dt_h
     out["e_dis_extra_kwh"] = out["p_dis_extra_kw"] * dt_h
 
-    # Erlös berechnen (€/Intervall)
-    out["revenue_eur"] = ((out["price_eur_per_mwh"] - fee_sell) * out["e_dis_extra_kwh"] \
+    out["revenue_eur"] = ((out["price_eur_per_mwh"] - fee_sell) * out["e_dis_extra_kwh"]
                            - (out["price_eur_per_mwh"] + fee_buy) * out["e_ch_extra_kwh"]) / 1000.0
 
     return out
@@ -280,21 +290,32 @@ def optimize_free(df_price: pd.DataFrame,
                   fee_buy: float = 0.0,
                   fee_sell: float = 0.0,
                   cycles_cap: float = 0.0) -> Optional[pd.DataFrame]:
+    """Klassische Arbitrage ohne Baseline-Zwänge. Erwartet ts, price_eur_per_mwh."""
+    if pulp is None:
+        st.error("PuLP ist nicht installiert. Bitte 'pip install pulp' ausführen und App neu starten.")
+        return None
+
+    n = len(df_price)
+    m = pulp.LpProblem("BESS_Arbitrage_free", pulp.LpMaximize)
+
+    ch = pulp.LpVariable.dicts("ch_kw", range(n), lowBound=0)
+    dis = pulp.LpVariable.dicts("dis_kw", range(n), lowBound=0)
+    soc = pulp.LpVariable.dicts("soc_kwh", range(n), lowBound=0, upBound=E_max)
+
+    revenue_terms = []
+    for t in range(n):
         p = float(df_price.loc[t, "price_eur_per_mwh"])  # €/MWh
-        revenue_terms.append( ((p - fee_sell) * dis[t] - (p + fee_buy) * ch[t]) * (dt_h / 1000.0) )
+        revenue_terms.append(((p - fee_sell) * dis[t] - (p + fee_buy) * ch[t]) * (dt_h / 1000.0))
     m += pulp.lpSum(revenue_terms)
 
-    # Dynamik
     m += soc[0] == soc0_kwh + (eta_ch * ch[0] - (dis[0] / eta_dis)) * dt_h
     for t in range(1, n):
         m += soc[t] == soc[t-1] + (eta_ch * ch[t] - (dis[t] / eta_dis)) * dt_h
 
-    # Leistungsgrenzen
     for t in range(n):
         m += ch[t] <= P_max
         m += dis[t] <= P_max
 
-    # Zyklenlimit pro Kalenderjahr (EFC): Entladeenergie / E_max <= cycles_cap
     if cycles_cap and cycles_cap > 0 and E_max > 0:
         years = df_price["ts"].dt.year.to_list()
         from collections import defaultdict
@@ -307,8 +328,7 @@ def optimize_free(df_price: pd.DataFrame,
     if fix_final:
         m += soc[n-1] == soc0_kwh
 
-    m.solve(pulp.PULP_CBC_CMD(msg=False))(pulp.PULP_CBC_CMD(msg=False))
-
+    m.solve(pulp.PULP_CBC_CMD(msg=False))
     if pulp.LpStatus[m.status] != "Optimal":
         st.error(f"Optimierung B (frei) nicht optimal: {pulp.LpStatus[m.status]}")
         return None
@@ -318,10 +338,10 @@ def optimize_free(df_price: pd.DataFrame,
     out["p_dis_kw"] = [pulp.value(dis[t]) for t in range(n)]
     out["soc_kwh"]  = [pulp.value(soc[t]) for t in range(n)]
 
-    out["e_ch_kwh"]  = out["p_ch_kw"]  * dt_h
+    out["e_ch_kwh"]  = out["p_ch_kw"] * dt_h
     out["e_dis_kwh"] = out["p_dis_kw"] * dt_h
 
-    out["revenue_eur"] = ((out["price_eur_per_mwh"] - fee_sell) * out["e_dis_kwh"] \
+    out["revenue_eur"] = ((out["price_eur_per_mwh"] - fee_sell) * out["e_dis_kwh"]
                            - (out["price_eur_per_mwh"] + fee_buy) * out["e_ch_kwh"]) / 1000.0
 
     return out
