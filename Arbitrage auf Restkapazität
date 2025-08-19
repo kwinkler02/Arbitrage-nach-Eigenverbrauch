@@ -153,8 +153,7 @@ price_df = price_df.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=Tru
 # Preis in €/MWh normieren
 if price_unit == "€/MWh":
     price_df["price_eur_per_mwh"] = price_df["price_raw"].astype(float)
-elsif := False
-if price_unit == "€/kWh":
+elif price_unit == "€/kWh":
     price_df["price_eur_per_mwh"] = price_df["price_raw"].astype(float) * 1000.0
 elif price_unit == "ct/kWh":
     price_df["price_eur_per_mwh"] = price_df["price_raw"].astype(float) * 10.0
