@@ -107,7 +107,11 @@ with cp6:
 
 cp7, cp8, cp9 = st.columns(3)
 with cp7:
-    cycles_cap = st.number_input("Max. Gesamt-Vollzyklen/Jahr [#]", min_value=0.0, value=0.0, step=0.5, help="0 = keine Begrenzung; gilt für Baseline + Zusatz") [#]", min_value=0.0, value=0.0, step=0.5, help="0 = keine Begrenzung")
+    cycles_cap = st.number_input(
+        "Max. Gesamt-Vollzyklen/Jahr [#]",
+        min_value=0.0, value=0.0, step=0.5,
+        help="0 = keine Begrenzung; gilt für Baseline + Zusatz"
+    )
 with cp8:
     fees = st.number_input("Gebühren [€/MWh] (Kauf/Verkauf)", min_value=0.0, value=0.0, step=0.1)
 with cp9:
