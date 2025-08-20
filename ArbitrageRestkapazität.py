@@ -233,4 +233,427 @@ if len(DF) > 8760:  # > 1 Jahr
 
 # Netzanschluss-Vorwarnung
 net_total_current = DF["netload_base_kw"] + DF["bess_busy_kw"]
-over_slots =
+over_slots = (net_total_current.abs() > P_conn + 1e-6).sum()
+if over_slots > 0:
+    st.warning(f"⚠️ In {over_slots} Slots überschreitet die Basislast bereits den Netzanschluss. Arbitrage hat dort keinen Spielraum.")
+
+# Baseline-Energie berechnen
+DF["e_dis_base_kwh"] = np.maximum(DF["bess_busy_kw"], 0.0) * dt_h
+DF["e_ch_base_kwh"]  = np.maximum(-DF["bess_busy_kw"], 0.0) * dt_h
+
+# Zyklenlimit-Vorprüfung
+if cycles_cap and cycles_cap > 0 and E_max > 0:
+    base_cycles_total = DF["e_dis_base_kwh"].sum() / E_max
+    if base_cycles_total > cycles_cap:
+        st.error(f"❌ Zyklenlimit bereits durch Baseline überschritten: {base_cycles_total:.2f} > {cycles_cap}. Keine Arbitrage möglich.")
+        if not ignore_busy:
+            st.stop()
+
+# ---------------------- Optimierer ----------------------
+def optimize_bess(df: pd.DataFrame,
+                  E_max: float, P_max: float, P_conn: float,
+                  eta_ch: float, eta_dis: float, dt_h: float,
+                  soc0_extra_kwh: float, fix_final: bool,
+                  fee_buy: float, fee_sell: float,
+                  cycles_cap: float, cycles_constraint: str,
+                  ignore_busy: bool = False) -> Optional[pd.DataFrame]:
+    
+    if pulp is None:
+        st.error("❌ PuLP nicht verfügbar. Bitte installieren: pip install pulp")
+        return None
+
+    n = len(df)
+    if n == 0:
+        st.error("Keine Daten für Optimierung verfügbar!")
+        return None
+
+    # Problem definieren
+    prob = pulp.LpProblem("BESS_Arbitrage", pulp.LpMaximize)
+
+    # Variablen
+    ch  = pulp.LpVariable.dicts("ch_kw",  range(n), lowBound=0)
+    dis = pulp.LpVariable.dicts("dis_kw", range(n), lowBound=0)
+    soc = pulp.LpVariable.dicts("soc_extra_kwh", range(n), lowBound=0)
+
+    # Zielfunktion: Erlös aus Arbitrage
+    prob += pulp.lpSum(
+        ((float(df.loc[i,"price_eur_per_mwh"]) - fee_sell) * dis[i] - 
+         (float(df.loc[i,"price_eur_per_mwh"]) + fee_buy) * ch[i]) * (dt_h/1000.0)
+        for i in range(n)
+    )
+
+    # SoC-Dynamik
+    prob += soc[0] == soc0_extra_kwh + (eta_ch*ch[0] - (dis[0]/eta_dis)) * dt_h
+    for i in range(1, n):
+        prob += soc[i] == soc[i-1] + (eta_ch*ch[i] - (dis[i]/eta_dis)) * dt_h
+
+    # Constraints
+    for i in range(n):
+        # SoC-Grenzen (verfügbarer Headroom)
+        soc_base_i = float(df.loc[i, "soc_base_kwh"])
+        headroom = max(0.0, E_max - soc_base_i)
+        prob += soc[i] <= headroom
+
+        # BESS-Leistungsgrenzen: verfügbare Restkapazität nutzen
+        if ignore_busy:
+            available_power = P_max
+        else:
+            busy_power = abs(float(df.loc[i, "bess_busy_kw"]))
+            available_power = max(0.0, P_max - busy_power)
+        
+        prob += ch[i]  <= available_power
+        prob += dis[i] <= available_power
+
+        # Netzanschluss-Constraints (vereinfacht)
+        base_net = float(df.loc[i, "netload_base_kw"]) + float(df.loc[i, "bess_busy_kw"])
+        net_total = base_net + (dis[i] - ch[i])
+        prob += net_total <= P_conn
+        prob += net_total >= -P_conn
+
+    # Zyklenlimit
+    if cycles_cap and cycles_cap > 0 and E_max > 0 and cycles_constraint != "Ignorieren":
+        base_cycles = float(df["e_dis_base_kwh"].sum()) if not ignore_busy else 0.0
+        additional_cycles = pulp.lpSum(dis[i] for i in range(n)) * dt_h
+        
+        if cycles_constraint == "Exakte Ausnutzung":
+            prob += additional_cycles + base_cycles == cycles_cap * E_max
+        else:  # Obergrenze
+            prob += additional_cycles + base_cycles <= cycles_cap * E_max
+
+    # End-SoC Constraint
+    if fix_final:
+        prob += soc[n-1] == soc0_extra_kwh
+
+    # Lösen
+    try:
+        prob.solve(pulp.PULP_CBC_CMD(msg=False))
+        
+        if pulp.LpStatus[prob.status] != "Optimal":
+            st.error(f"❌ Optimierung fehlgeschlagen: {pulp.LpStatus[prob.status]}")
+            return None
+
+    except Exception as e:
+        st.error(f"❌ Fehler bei Optimierung: {str(e)}")
+        return None
+
+    # Ergebnisse extrahieren
+    result = df.copy()
+    result["p_ch_kw"]  = [pulp.value(ch[i]) or 0.0 for i in range(n)]
+    result["p_dis_kw"] = [pulp.value(dis[i]) or 0.0 for i in range(n)]
+    result["soc_extra_kwh"] = [pulp.value(soc[i]) or 0.0 for i in range(n)]
+
+    # Berechnete Felder
+    result["soc_total_kwh"] = result["soc_base_kwh"] + result["soc_extra_kwh"]
+    result["e_ch_kwh"]  = result["p_ch_kw"]  * dt_h
+    result["e_dis_kwh"] = result["p_dis_kw"] * dt_h
+    result["net_total_kw"] = (result["netload_base_kw"] + result["bess_busy_kw"] + 
+                             result["p_dis_kw"] - result["p_ch_kw"])
+    result["revenue_eur"] = ((result["price_eur_per_mwh"] - fee_sell) * result["e_dis_kwh"] - 
+                            (result["price_eur_per_mwh"] + fee_buy) * result["e_ch_kwh"]) / 1000.0
+
+    return result
+
+# ---------------------- Freier Handel Optimierer (Vergleichsszenario) ----------------------
+def optimize_free_trading(df: pd.DataFrame,
+                         E_max: float, P_max: float,
+                         eta_ch: float, eta_dis: float, dt_h: float,
+                         soc0_extra_kwh: float, fix_final: bool,
+                         fee_buy: float, fee_sell: float,
+                         cycles_cap: float, cycles_constraint: str) -> Optional[pd.DataFrame]:
+    """
+    Optimierung ohne Netz- und Eigenverbrauch-Constraints.
+    Nur Batterie-Parameter und Zyklenlimit.
+    """
+    if pulp is None:
+        return None
+
+    n = len(df)
+    if n == 0:
+        return None
+
+    # Problem definieren
+    prob = pulp.LpProblem("BESS_Free_Trading", pulp.LpMaximize)
+
+    # Variablen
+    ch  = pulp.LpVariable.dicts("ch_free_kw",  range(n), lowBound=0, upBound=P_max)
+    dis = pulp.LpVariable.dicts("dis_free_kw", range(n), lowBound=0, upBound=P_max)
+    soc = pulp.LpVariable.dicts("soc_free_kwh", range(n), lowBound=0, upBound=E_max)
+
+    # Zielfunktion: Erlös aus freiem Handel
+    prob += pulp.lpSum(
+        ((float(df.loc[i,"price_eur_per_mwh"]) - fee_sell) * dis[i] - 
+         (float(df.loc[i,"price_eur_per_mwh"]) + fee_buy) * ch[i]) * (dt_h/1000.0)
+        for i in range(n)
+    )
+
+    # SoC-Dynamik
+    prob += soc[0] == soc0_extra_kwh + (eta_ch*ch[0] - (dis[0]/eta_dis)) * dt_h
+    for i in range(1, n):
+        prob += soc[i] == soc[i-1] + (eta_ch*ch[i] - (dis[i]/eta_dis)) * dt_h
+
+    # Zyklenlimit (falls aktiviert)
+    if cycles_cap and cycles_cap > 0 and E_max > 0 and cycles_constraint != "Ignorieren":
+        total_discharge = pulp.lpSum(dis[i] for i in range(n)) * dt_h
+        
+        if cycles_constraint == "Exakte Ausnutzung":
+            prob += total_discharge == cycles_cap * E_max
+        else:  # Obergrenze
+            prob += total_discharge <= cycles_cap * E_max
+
+    # End-SoC Constraint
+    if fix_final:
+        prob += soc[n-1] == soc0_extra_kwh
+
+    # Lösen
+    try:
+        prob.solve(pulp.PULP_CBC_CMD(msg=False))
+        
+        if pulp.LpStatus[prob.status] != "Optimal":
+            return None
+
+    except Exception:
+        return None
+
+    # Ergebnisse für Vergleich
+    result = df[["price_eur_per_mwh"]].copy()
+    result["p_ch_free_kw"]  = [pulp.value(ch[i]) or 0.0 for i in range(n)]
+    result["p_dis_free_kw"] = [pulp.value(dis[i]) or 0.0 for i in range(n)]
+    result["soc_free_kwh"] = [pulp.value(soc[i]) or 0.0 for i in range(n)]
+    result["e_ch_free_kwh"]  = result["p_ch_free_kw"]  * dt_h
+    result["e_dis_free_kwh"] = result["p_dis_free_kw"] * dt_h
+    result["revenue_free_eur"] = ((result["price_eur_per_mwh"] - fee_sell) * result["e_dis_free_kwh"] - 
+                                 (result["price_eur_per_mwh"] + fee_buy) * result["e_ch_free_kwh"]) / 1000.0
+
+    return result
+
+# ---------------------- Optimierung ausführen ----------------------
+run_button = st.button("🚀 Optimierung starten", type="primary")
+if not run_button:
+    st.stop()
+
+with st.spinner("Optimierung läuft..."):
+    # Hauptoptimierung: mit allen Constraints
+    result = optimize_bess(
+        DF.copy(), E_max, P_max, P_conn, eta_ch, eta_dis, dt_h,
+        soc0_extra_kwh, fix_final, fee_buy, fee_sell, 
+        cycles_cap, cycles_constraint, ignore_busy
+    )
+    
+    # Vergleichsoptimierung: komplett freier Handel (ohne Netz/Eigenverbrauch-Constraints)
+    st.info("Berechne Vergleichsszenario: komplett freier Handel...")
+    result_free = optimize_free_trading(
+        DF.copy(), E_max, P_max, eta_ch, eta_dis, dt_h,
+        soc0_extra_kwh, fix_final, fee_buy, fee_sell, 
+        cycles_cap, cycles_constraint
+    )
+
+if result is None or result_free is None:
+    if result is None:
+        st.error("Hauptoptimierung fehlgeschlagen!")
+    if result_free is None:
+        st.error("Vergleichsoptimierung fehlgeschlagen!")
+    st.stop()
+
+# ---------------------- Ergebnisse & KPIs ----------------------
+st.subheader("📊 Ergebnisse")
+
+# Hauptoptimierung (mit Constraints)
+revenue_total = result["revenue_eur"].sum()
+energy_charged = result["e_ch_kwh"].sum()
+energy_discharged = result["e_dis_kwh"].sum()
+arbitrage_cycles = energy_discharged / E_max if E_max > 0 else 0
+baseline_cycles = DF["e_dis_base_kwh"].sum() / E_max if E_max > 0 else 0
+total_cycles = arbitrage_cycles + baseline_cycles
+
+# Freier Handel (ohne Constraints)
+revenue_free = result_free["revenue_free_eur"].sum()
+energy_charged_free = result_free["e_ch_free_kwh"].sum()
+energy_discharged_free = result_free["e_dis_free_kwh"].sum()
+cycles_free = energy_discharged_free / E_max if E_max > 0 else 0
+
+# Vergleichsmetriken
+revenue_gap_abs = revenue_free - revenue_total
+revenue_gap_pct = (revenue_gap_abs / revenue_free * 100) if revenue_free != 0 else 0
+
+# Hauptmetriken
+st.write("### 🎯 Hauptvergleich: Realistisch vs. Freier Handel")
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("Erlös (realistisch)", f"{revenue_total:,.0f} €", 
+             help="Mit Netz-, SoC- und Eigenverbrauch-Constraints")
+with col2:
+    st.metric("Erlös (freier Handel)", f"{revenue_free:,.0f} €", 
+             help="Nur Batterie-Parameter und Zyklenlimit")
+with col3:
+    st.metric("Verlust durch Constraints", f"-{revenue_gap_abs:,.0f} € ({revenue_gap_pct:.1f}%)",
+             delta=f"{revenue_gap_pct:.1f}%", delta_color="inverse")
+
+# Detailmetriken
+st.write("### 📋 Detaillierte Kennzahlen")
+col4, col5, col6, col7 = st.columns(4)
+with col4:
+    st.metric("Arbitrage-Zyklen (real)", f"{arbitrage_cycles:.1f}")
+    st.metric("Arbitrage-Zyklen (frei)", f"{cycles_free:.1f}")
+with col5:
+    st.metric("Gesamt-Zyklen (real)", f"{total_cycles:.1f}")
+    st.metric("Nur Arbitrage (frei)", f"{cycles_free:.1f}")
+with col6:
+    efficiency = (energy_discharged / energy_charged * 100) if energy_charged > 0 else 0
+    efficiency_free = (energy_discharged_free / energy_charged_free * 100) if energy_charged_free > 0 else 0
+    st.metric("Effizienz (real)", f"{efficiency:.1f}%")
+    st.metric("Effizienz (frei)", f"{efficiency_free:.1f}%")
+with col7:
+    total_capacity = len(result) * P_max * dt_h
+    used_capacity = result["p_ch_kw"].sum() + result["p_dis_kw"].sum()
+    used_capacity_free = result_free["p_ch_free_kw"].sum() + result_free["p_dis_free_kw"].sum()
+    capacity_utilization = (used_capacity / total_capacity * 100) if total_capacity > 0 else 0
+    capacity_utilization_free = (used_capacity_free / total_capacity * 100) if total_capacity > 0 else 0
+    st.metric("Kapazitätsnutzung (real)", f"{capacity_utilization:.1f}%")
+    st.metric("Kapazitätsnutzung (frei)", f"{capacity_utilization_free:.1f}%")
+
+# ---------------------- Zusätzliche Detailmetriken (NACH der Optimierung!) ----------------------
+st.write("### 🔍 Weitere Analysen")
+
+# Preise gewichtet nach Energie (robust gegen Division durch 0)
+avg_price_charge = (
+    (result.loc[result["e_ch_kwh"] > 0, "price_eur_per_mwh"] * result.loc[result["e_ch_kwh"] > 0, "e_ch_kwh"]).sum()
+    / energy_charged if energy_charged > 0 else 0.0
+)
+
+avg_price_charge_free = (
+    (result_free.loc[result_free["e_ch_free_kwh"] > 0, "price_eur_per_mwh"] * result_free.loc[result_free["e_ch_free_kwh"] > 0, "e_ch_free_kwh"]).sum()
+    / energy_charged_free if energy_charged_free > 0 else 0.0
+)
+
+avg_price_discharge = (
+    (result.loc[result["e_dis_kwh"] > 0, "price_eur_per_mwh"] * result.loc[result["e_dis_kwh"] > 0, "e_dis_kwh"]).sum()
+    / energy_discharged if energy_discharged > 0 else 0.0
+)
+
+avg_price_discharge_free = (
+    (result_free.loc[result_free["e_dis_free_kwh"] > 0, "price_eur_per_mwh"] * result_free.loc[result_free["e_dis_free_kwh"] > 0, "e_dis_free_kwh"]).sum()
+    / energy_discharged_free if energy_discharged_free > 0 else 0.0
+)
+
+max_net_load = float(result["net_total_kw"].abs().max())
+
+price_spread = (avg_price_discharge - avg_price_charge) if (avg_price_charge > 0) else 0.0
+price_spread_free = (avg_price_discharge_free - avg_price_charge_free) if (avg_price_charge_free > 0) else 0.0
+
+col8, col9, col10, col11 = st.columns(4)
+with col8:
+    st.metric("⌀ Lade-Preis (real)", f"{avg_price_charge:.1f} €/MWh")
+    st.metric("⌀ Lade-Preis (frei)", f"{avg_price_charge_free:.1f} €/MWh")
+with col9:
+    st.metric("⌀ Entlade-Preis (real)", f"{avg_price_discharge:.1f} €/MWh")
+    st.metric("⌀ Entlade-Preis (frei)", f"{avg_price_discharge_free:.1f} €/MWh")
+with col10:
+    st.metric("Max. Netzlast", f"{max_net_load:.1f} kW")
+    st.metric("Netz-Constraint", f"± {P_conn:.0f} kW")
+with col11:
+    st.metric("Preis-Spread (real)", f"{price_spread:.1f} €/MWh")
+    st.metric("Preis-Spread (frei)", f"{price_spread_free:.1f} €/MWh")
+
+# ---------------------- Visualisierung ----------------------
+st.subheader("📈 Zeitreihendarstellung (erste 7 Tage)")
+
+# Daten für Plot vorbereiten (erste Woche)
+sample_hours = min(7*24, len(result))
+sample_slots = max(1, int(sample_hours / dt_h))
+plot_data = result.iloc[:sample_slots].copy()
+
+if "ts" in plot_data.columns:
+    x_axis = "ts:T"
+    plot_data = plot_data.reset_index()
+else:
+    plot_data = plot_data.reset_index()
+    x_axis = "index:Q"
+
+import altair as alt
+
+# Preise
+price_chart = alt.Chart(plot_data).mark_line(color='blue').encode(
+    x=alt.X(x_axis, title="Zeit"),
+    y=alt.Y("price_eur_per_mwh:Q", title="Preis [€/MWh]")
+).properties(height=150, title="Day-Ahead Preise")
+
+# BESS-Leistung
+power_data = plot_data[["index" if "ts" not in plot_data.columns else "ts", "p_ch_kw", "p_dis_kw"]].melt(
+    id_vars=["index" if "ts" not in plot_data.columns else "ts"],
+    value_vars=["p_ch_kw", "p_dis_kw"],
+    var_name="Typ", value_name="Leistung"
+)
+
+power_chart = alt.Chart(power_data).mark_bar().encode(
+    x=alt.X(x_axis.split(':')[0] + ":O" if "index" in x_axis else x_axis, title="Zeit"),
+    y=alt.Y("Leistung:Q", title="BESS-Leistung [kW]"),
+    color=alt.Color("Typ:N", scale=alt.Scale(domain=["p_ch_kw", "p_dis_kw"], 
+                                           range=["red", "green"]))
+).properties(height=200, title="BESS Lade-/Entladeleistung")
+
+# SoC
+soc_chart = alt.Chart(plot_data).mark_line(color='orange', strokeWidth=2).encode(
+    x=alt.X(x_axis, title="Zeit"),
+    y=alt.Y("soc_total_kwh:Q", title="SoC [kWh]", scale=alt.Scale(domain=[0, E_max]))
+).properties(height=150, title="Batterie-SoC (gesamt)")
+
+# Netzlast
+net_chart = alt.Chart(plot_data).mark_line(color='purple').encode(
+    x=alt.X(x_axis, title="Zeit"),
+    y=alt.Y("net_total_kw:Q", title="Netzlast [kW]")
+).properties(height=150, title="Gesamte Netzlast")
+
+# Charts anzeigen
+st.altair_chart(price_chart, use_container_width=True)
+st.altair_chart(power_chart, use_container_width=True)
+st.altair_chart(soc_chart, use_container_width=True)
+st.altair_chart(net_chart, use_container_width=True)
+
+# ---------------------- Export ----------------------
+st.subheader("💾 Export")
+
+# KPI-Zusammenfassung für Export
+kpi_summary = pd.DataFrame({
+    "Kennzahl": [
+        "Erlös realistisch [€]", "Erlös freier Handel [€]", "Verlust absolut [€]", "Verlust relativ [%]",
+        "Energie geladen real [kWh]", "Energie geladen frei [kWh]", 
+        "Energie entladen real [kWh]", "Energie entladen frei [kWh]",
+        "Arbitrage-Zyklen real [#]", "Arbitrage-Zyklen frei [#]",
+        "Baseline-Zyklen [#]", "Gesamt-Zyklen real [#]",
+        "Roundtrip-Effizienz real [%]", "Roundtrip-Effizienz frei [%]",
+        "Ø Lade-Preis real [€/MWh]", "Ø Lade-Preis frei [€/MWh]",
+        "Ø Entlade-Preis real [€/MWh]", "Ø Entlade-Preis frei [€/MWh]",
+        "Preis-Spread real [€/MWh]", "Preis-Spread frei [€/MWh]",
+        "Max. Netzlast [kW]", "Kapazitätsnutzung real [%]", "Kapazitätsnutzung frei [%]",
+        "RTE [%]", "E_max [kWh]", "P_max [kW]", "P_conn [kW]", "Zyklenlimit [#/Jahr]"
+    ],
+    "Wert": [
+        round(revenue_total, 2), round(revenue_free, 2), round(revenue_gap_abs, 2), round(revenue_gap_pct, 1),
+        round(energy_charged, 1), round(energy_charged_free, 1),
+        round(energy_discharged, 1), round(energy_discharged_free, 1),
+        round(arbitrage_cycles, 2), round(cycles_free, 2),
+        round(baseline_cycles, 2), round(total_cycles, 2),
+        round(efficiency, 1), round(efficiency_free, 1),
+        round(avg_price_charge, 1), round(avg_price_charge_free, 1),
+        round(avg_price_discharge, 1), round(avg_price_discharge_free, 1),
+        round(price_spread, 1), round(price_spread_free, 1),
+        round(max_net_load, 1), round(capacity_utilization, 1), round(capacity_utilization_free, 1),
+        rte_pct, E_max, P_max, P_conn, cycles_cap
+    ]
+})
+
+# Excel-Export erstellen
+bio = BytesIO()
+with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+    result.to_excel(writer, index=False, sheet_name="Zeitreihen_Real")
+    result_free.to_excel(writer, index=False, sheet_name="Zeitreihen_FreierHandel")
+    kpi_summary.to_excel(writer, index=False, sheet_name="KPIs_Vergleich")
+
+bio.seek(0)
+
+st.download_button(
+    "📥 Ergebnisse als Excel herunterladen",
+    data=bio,
+    file_name="BESS_Arbitrage_Ergebnisse.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
