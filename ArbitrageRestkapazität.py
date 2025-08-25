@@ -660,6 +660,15 @@ st.subheader("📊 Ergebnisse")
 
 pv_kpis = calculate_pv_kpis(result, dt_h, E_max)
 
+# EEG: energiegewichteter Einspeisewert für genutzte PV & negative-Preis-Stunden (früh berechnet)
+if pv_kpis["e_ch_pv_total"] > 0:
+    eeg_value_weighted = (
+        (result["eeg_feed_in_value_eur_mwh"] * result["e_ch_pv_kwh"]).sum() / pv_kpis["e_ch_pv_total"]
+    )
+else:
+    eeg_value_weighted = 0.0
+neg_price_hours = int((result["price_eur_per_mwh"] < 0).sum())
+
 # --- PV-Shift vs EEG: Fluss-Tracing (ex-post) ---
 soc_pv = 0.0
 soc_grid = 0.0
@@ -839,14 +848,7 @@ used_capacity_free = (result_free["p_ch_free_kw"].sum() + result_free["p_dis_fre
 capacity_utilization_total = (used_capacity_total / total_capacity * 100.0) if total_capacity > 0 else 0.0
 capacity_utilization_free = (used_capacity_free / total_capacity * 100.0) if total_capacity > 0 else 0.0
 
-# EEG-Infos
-if pv_kpis["e_ch_pv_total"] > 0:
-    eeg_value_weighted = (
-        (result["eeg_feed_in_value_eur_mwh"] * result["e_ch_pv_kwh"]).sum() / pv_kpis["e_ch_pv_total"]
-    )
-else:
-    eeg_value_weighted = 0.0
-neg_price_hours = int((result["price_eur_per_mwh"] < 0).sum())
+# EEG-Infos (oben berechnet)
 
 col12, col13, col14, col15 = st.columns(4)
 with col12:
@@ -886,134 +888,3 @@ price_chart = alt.Chart(plot_data).mark_line().encode(
 
 # PV-Erzeugung und -Nutzung
 pv_data = plot_data[["index" if "ts" not in plot_data.columns else "ts", 
-                    "pv_generation_kw", "pv_surplus_available_kw", "pv_surplus_used_kw"]].melt(
-    id_vars=["index" if "ts" not in plot_data.columns else "ts"],
-    value_vars=["pv_generation_kw", "pv_surplus_available_kw", "pv_surplus_used_kw"],
-    var_name="Typ", value_name="Leistung"
-)
-
-pv_chart = alt.Chart(pv_data).mark_line().encode(
-    x=alt.X(x_axis.split(':')[0] + ":O" if "index" in x_axis else x_axis, title="Zeit"),
-    y=alt.Y("Leistung:Q", title="PV-Leistung [kW]"),
-    color=alt.Color("Typ:N", legend=alt.Legend(title="PV-Daten"))
-).properties(height=200, title="PV-Erzeugung und -Nutzung")
-
-# BESS-Leistung
-power_data = plot_data[["index" if "ts" not in plot_data.columns else "ts", 
-                       "p_ch_pv_kw", "p_ch_grid_kw", "p_dis_kw"]].melt(
-    id_vars=["index" if "ts" not in plot_data.columns else "ts"],
-    value_vars=["p_ch_pv_kw", "p_ch_grid_kw", "p_dis_kw"],
-    var_name="Typ", value_name="Leistung"
-)
-
-power_chart = alt.Chart(power_data).mark_bar().encode(
-    x=alt.X(x_axis.split(':')[0] + ":O" if "index" in x_axis else x_axis, title="Zeit"),
-    y=alt.Y("Leistung:Q", title="BESS-Leistung [kW]"),
-    color=alt.Color("Typ:N", legend=alt.Legend(title="BESS-Betrieb"))
-).properties(height=200, title="BESS Lade-/Entladeleistung (PV-First)")
-
-# SoC
-soc_chart = alt.Chart(plot_data).mark_line().encode(
-    x=alt.X(x_axis, title="Zeit"),
-    y=alt.Y("soc_total_kwh:Q", title="SoC [kWh]", scale=alt.Scale(domain=[0, E_max]))
-).properties(height=150, title="Batterie-SoC (gesamt)")
-
-# Netzlast	net_chart = alt.Chart(plot_data).mark_line().encode(
-    x=alt.X(x_axis, title="Zeit"),
-    y=alt.Y("net_total_kw:Q", title="Netzlast [kW]")
-).properties(height=150, title="Gesamte Netzlast (ohne PV-Laden)")
-
-st.altair_chart(price_chart, use_container_width=True)
-st.altair_chart(pv_chart, use_container_width=True)
-st.altair_chart(power_chart, use_container_width=True)
-st.altair_chart(soc_chart, use_container_width=True)
-st.altair_chart(net_chart, use_container_width=True)
-
-# =============================================================
-# --------------------------- Export --------------------------
-# =============================================================
-st.subheader("💾 Export")
-
-# KPI-Tabelle für Export
-kpi_rows = []
-kpi_rows.append(("Erlös PV-First [€]", round(pv_kpis['total_revenue'], 2)))
-kpi_rows.append(("Erlös freier Handel [€]", round(revenue_free, 2)))
-kpi_rows.append(("Verlust absolut [€]", round(revenue_gap_abs, 2)))
-kpi_rows.append(("Verlust relativ [%]", round(revenue_gap_pct, 1)))
-
-kpi_rows.append(("PV-Überschuss gesamt [kWh]", round(pv_kpis['pv_surplus_total'], 1)))
-kpi_rows.append(("PV-Überschuss genutzt [kWh]", round(pv_kpis['pv_used_total'], 1)))
-kpi_rows.append(("PV-Nutzungsgrad [%]", round(pv_kpis['pv_utilization_rate'], 1)))
-kpi_rows.append(("PV-Anteil am Laden [%]", round(pv_kpis['pv_share_in_charging'], 1)))
-kpi_rows.append(("Abregelung vermieden [kWh]", round(pv_kpis['pv_used_total'], 1)))
-kpi_rows.append(("Abregelung verbleibend [kWh]", round(pv_kpis['pv_curtailed_total'], 1)))
-
-kpi_rows.append(("Energie geladen (PV) [kWh]", round(pv_kpis['e_ch_pv_total'], 1)))
-kpi_rows.append(("Energie geladen (Grid) [kWh]", round(pv_kpis['e_ch_grid_total'], 1)))
-kpi_rows.append(("Energie geladen (frei) [kWh]", round(energy_charged_free, 1)))
-
-kpi_rows.append(("Energie entladen [kWh]", round(pv_kpis['e_dis_total'], 1)))
-kpi_rows.append(("Energie entladen (frei) [kWh]", round(energy_discharged_free, 1)))
-
-kpi_rows.append(("PV-Zyklen [#]", round(pv_kpis['pv_cycles'], 2)))
-kpi_rows.append(("Grid-Arbitrage-Zyklen [#]", round(pv_kpis['grid_cycles'], 2)))
-kpi_rows.append(("Gesamt-Arbitrage-Zyklen [#]", round(pv_kpis['total_cycles'], 2)))
-
-kpi_rows.append(("Baseline-Zyklen [#]", round(baseline_cycles, 2)))
-kpi_rows.append(("Gesamt-Zyklen real [#]", round(total_cycles_real, 2)))
-kpi_rows.append(("Gesamt-Zyklen frei [#]", round(cycles_free, 2)))
-
-kpi_rows.append(("RTE gesamt [%]", round(efficiency_total, 1)))
-kpi_rows.append(("RTE frei [%]", round(efficiency_free, 1)))
-
-kpi_rows.append(("Arbitrage-Erlös [€]", round(pv_kpis['arbitrage_revenue'], 2)))
-kpi_rows.append(("PV-Nutzungswert (EEG) [€]", round(pv_kpis['pv_value'], 2)))
-kpi_rows.append(("Gesamt-Nutzen [€]", round(pv_kpis['total_revenue'], 2)))
-
-kpi_rows.append(("Ø Grid-Lade-Preis [€/MWh]", round(avg_price_charge_grid, 1)))
-kpi_rows.append(("Ø Lade-Preis frei [€/MWh]", round(avg_price_charge_free, 1)))
-
-kpi_rows.append(("Ø Entlade-Preis [€/MWh]", round(avg_price_discharge, 1)))
-kpi_rows.append(("Ø Entlade-Preis frei [€/MWh]", round(avg_price_discharge_free, 1)))
-
-kpi_rows.append(("Grid-Preis-Spread [€/MWh]", round(price_spread, 1)))
-kpi_rows.append(("Preis-Spread frei [€/MWh]", round(price_spread_free, 1)))
-
-kpi_rows.append(("Max. Netzlast [kW]", round(max_net_load, 1)))
-kpi_rows.append(("Kapazitätsnutzung real [%]", round(capacity_utilization_total, 1)))
-kpi_rows.append(("Kapazitätsnutzung frei [%]", round(capacity_utilization_free, 1)))
-
-kpi_rows.append(("RTE [%]", rte_pct))
-kpi_rows.append(("E_max [kWh]", E_max))
-kpi_rows.append(("P_max [kW]", P_max))
-kpi_rows.append(("P_conn [kW]", P_conn))
-kpi_rows.append(("Zyklenlimit [#/Jahr]", cycles_cap))
-kpi_rows.append(("EEG aktiv [ja/nein]", "ja" if enable_eeg else "nein"))
-kpi_rows.append(("EEG-Vergütungssatz [€/MWh]", eeg_tariff))
-kpi_rows.append(("Ø EEG-Einspeisewert für genutzte PV [€/MWh]", round(eeg_value_weighted, 1)))
-kpi_rows.append(("Stunden mit negativen Preisen [#]", neg_price_hours))
-
-# EEG-spezifische KPI-Zusätze
-kpi_rows.append(("EEG-Verlust durch BESS [€]", round(eeg_loss_eur, 2)))
-kpi_rows.append(("EEG-Export (ohne BESS) [€]", round(baseline_eeg_export_eur, 2)))
-kpi_rows.append(("EEG-Export (mit BESS) [€]", round(with_bess_eeg_export_eur, 2)))
-kpi_rows.append(("Netto-Erlös ggü. EEG-Baseline [€]", round(net_uplift_vs_eeg_eur, 2)))
-kpi_rows.append(("Ø Entladepreis (PV-Anteil) [€/MWh]", round(avg_p_dis_pv, 1)))
-kpi_rows.append(("Break-even Entladepreis [€/MWh]", round(break_even_price_avg, 1)))
-kpi_summary = pd.DataFrame(kpi_rows, columns=["Kennzahl","Wert"])
-
-# Excel-Export erstellen
-bio = BytesIO()
-with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-    result.to_excel(writer, index=False, sheet_name="Zeitreihen_PV_First")
-    result_free.to_excel(writer, index=False, sheet_name="Zeitreihen_FreierHandel")
-    kpi_summary.to_excel(writer, index=False, sheet_name="KPIs_Vergleich")
-
-bio.seek(0)
-
-st.download_button(
-    "📥 Ergebnisse als Excel herunterladen",
-    data=bio,
-    file_name="BESS_PV_First_Arbitrage_Ergebnisse.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
