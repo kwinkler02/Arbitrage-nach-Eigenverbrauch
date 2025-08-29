@@ -171,17 +171,16 @@ cp1, cp2, cp3 = st.columns(3)
 with cp1:
     E_max = ui_float("E_max nutzbar [kWh]", 150.0, min_value=0.0, key="E_max")
 with cp2:
-    P_max = ui_float("BESS P_max (sym) [kW]", 100.0, min_value=0.0, key="P_max") [kW]", min_value=0.1, value=100.0, step=1.0)
+    P_max = ui_float("BESS P_max (sym) [kW]", 100.0, min_value=0.0, key="P_max")
 with cp3:
-    P_conn = ui_float("Netzanschluss P_conn [kW] (symmetrisch)", 73.0, min_value=0.0, key="P_conn", help="Max. absolute Netzleistung |P| ≤ P_conn")", min_value=0.1, value=73.0, step=1.0,
-                            help="Max. absolute Netzleistung |P| ≤ P_conn")
+    P_conn = ui_float("Netzanschluss P_conn [kW] (symmetrisch)", 73.0, min_value=0.0, key="P_conn", help="Max. absolute Netzleistung |P| ≤ P_conn")
 
 if P_max > P_conn:
     st.warning("⚠️ BESS-Leistung > Netzanschluss - kann zu suboptimalen Lösungen führen")
 
 cp4, cp5, cp6 = st.columns(3)
 with cp4:
-    rte_pct = ui_float("RTE [%]", 95.0, min_value=0.0, max_value=100.0, key="RTE", help="Round-Trip-Effizienz in %. Beispiele: 90, 90%, 0.9 → 0.9 wird als 0.9% interpretiert, bitte 90% eingeben.") und Enter drücken. Werte <50% sind technisch erlaubt, aber ungewöhnlich.")
+    rte_pct = ui_float("RTE [%]", 95.0, min_value=0.0, max_value=100.0, key="RTE", help="Round-Trip-Effizienz in %. Beispiele: 90, 90%. Bitte als Prozent eingeben.")
 with cp5:
     soc0_extra_pct = st.slider("Start-SoC_extra [% von E_max]", min_value=0, max_value=100, value=0)
 with cp6:
@@ -199,7 +198,7 @@ with cp7:
         help="0 = keine Begrenzung; gilt für Baseline + Zusatz"
     )
 with cp8:
-    fees = ui_float("Gebühren [€/MWh] (Kauf/Verkauf)", 0.0, min_value=0.0, key="fees")", min_value=0.0, value=0.0, step=0.1)
+    fees = ui_float("Gebühren [€/MWh] (Kauf/Verkauf)", 0.0, min_value=0.0, key="fees")
 with cp9:
     enable_eeg = st.checkbox("EEG-Vergütung aktiv", value=True,
                              help="Wenn aktiv: PV-Einspeisewert je Slot = 0 bei negativen Preisen, sonst max(EEG, Day-Ahead)")
