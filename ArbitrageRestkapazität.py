@@ -14,6 +14,63 @@ except Exception:
 # Optional: Charts
 import altair as alt
 
+# ------- Robuste Zahleneingaben (sprach-/format-tolerant) -------
+# Erlaubt Eingaben wie 180000, 180.000, 180 000, 180.000,5, 180000.5, 90%, 10k, 1M
+import re
+
+def _parse_local_float(s, default=None):
+    try:
+        if s is None:
+            return float(default) if default is not None else 0.0
+        if isinstance(s, (int, float)):
+            return float(s)
+        s = str(s).strip().replace(" ", "")
+        if s == "":
+            return float(default) if default is not None else 0.0
+        # Prozentzeichen tolerieren
+        if s.endswith("%"):
+            s = s[:-1]
+        # k/M Suffix
+        mult = 1.0
+        if s.endswith(("k", "K")):
+            mult = 1e3; s = s[:-1]
+        elif s.endswith(("m", "M")):
+            mult = 1e6; s = s[:-1]
+        # Lokale Dezimal-/Tausender-Trennung
+        if s.count(",") > 0 and s.count(".") > 0:
+            s = s.replace(".", "").replace(",", ".")
+        elif s.count(",") > 0 and s.count(".") == 0:
+            s = s.replace(",", ".")
+        return float(s) * mult
+    except Exception:
+        return float(default) if default is not None else 0.0
+
+def ui_float(label, default, min_value=None, max_value=None, key=None, help=None, disabled=False):
+    raw = st.text_input(label, value=f"{default}", key=key, help=help, disabled=disabled)
+    val = _parse_local_float(raw, default)
+    # Begrenzen + Feedback
+    if min_value is not None and val < min_value:
+        st.warning(f"{label}: Wert unter Minimum ({min_value}). Auf Minimum gesetzt.")
+        val = min_value
+    if max_value is not None and val > max_value:
+        st.warning(f"{label}: Wert über Maximum ({max_value}). Auf Maximum gesetzt.")
+        val = max_value
+    return val
+
+def ui_int(label, default, min_value=None, max_value=None, key=None, help=None, disabled=False):
+    raw = st.text_input(label, value=f"{int(default)}", key=key, help=help, disabled=disabled)
+    try:
+        val = int(round(_parse_local_float(raw, default)))
+    except Exception:
+        val = int(default)
+    if min_value is not None and val < min_value:
+        st.warning(f"{label}: Wert unter Minimum ({min_value}). Auf Minimum gesetzt.")
+        val = min_value
+    if max_value is not None and val > max_value:
+        st.warning(f"{label}: Wert über Maximum ({max_value}). Auf Maximum gesetzt.")
+        val = max_value
+    return val
+
 st.set_page_config(page_title="BESS – Arbitrage (PV-First)", layout="wide")
 st.title("⚡ BESS-Arbitrage mit PV-First-Strategie & intelligenter Restkapazitätsnutzung")
 
@@ -112,11 +169,11 @@ price_unit = st.radio("Preiseinheit", ["€/MWh","€/kWh","ct/kWh"], horizontal
 st.subheader("Batterie- & Netz-Parameter")
 cp1, cp2, cp3 = st.columns(3)
 with cp1:
-    E_max = st.number_input("E_max nutzbar [kWh]", min_value=1.0, value=150.0, step=1.0)
+    E_max = ui_float("E_max nutzbar [kWh]", 150.0, min_value=0.0, key="E_max")
 with cp2:
-    P_max = st.number_input("BESS P_max (sym) [kW]", min_value=0.1, value=100.0, step=1.0)
+    P_max = ui_float("BESS P_max (sym) [kW]", 100.0, min_value=0.0, key="P_max") [kW]", min_value=0.1, value=100.0, step=1.0)
 with cp3:
-    P_conn = st.number_input("Netzanschluss P_conn [kW] (symmetrisch)", min_value=0.1, value=73.0, step=1.0,
+    P_conn = ui_float("Netzanschluss P_conn [kW] (symmetrisch)", 73.0, min_value=0.0, key="P_conn", help="Max. absolute Netzleistung |P| ≤ P_conn")", min_value=0.1, value=73.0, step=1.0,
                             help="Max. absolute Netzleistung |P| ≤ P_conn")
 
 if P_max > P_conn:
@@ -124,25 +181,29 @@ if P_max > P_conn:
 
 cp4, cp5, cp6 = st.columns(3)
 with cp4:
-    rte_pct = st.number_input("RTE [%]", min_value=50.0, max_value=100.0, value=95.0, step=0.5)
+    rte_pct = ui_float("RTE [%]", 95.0, min_value=0.0, max_value=100.0, key="RTE", help="Round-Trip-Effizienz in %. Beispiele: 90, 90%, 0.9 → 0.9 wird als 0.9% interpretiert, bitte 90% eingeben.") und Enter drücken. Werte <50% sind technisch erlaubt, aber ungewöhnlich.")
 with cp5:
     soc0_extra_pct = st.slider("Start-SoC_extra [% von E_max]", min_value=0, max_value=100, value=0)
 with cp6:
     fix_final = st.checkbox("Finaler SoC_extra = Start-SoC_extra", value=True)
 
+# Soft-Validierung für RTE (<50% oft unrealistisch)
+if rte_pct < 50.0:
+    st.warning("⚠️ Sehr niedrige RTE (<50%) eingegeben – bitte prüfen. Üblich sind 80–95%.")
+
 cp7, cp8, cp9 = st.columns(3)
 with cp7:
-    cycles_cap = st.number_input(
+    cycles_cap = ui_float(
         "Max. Gesamt-Vollzyklen/Jahr [#]",
-        min_value=0.0, value=0.0, step=0.5,
+        0.0, min_value=0.0, key="cycles_cap",
         help="0 = keine Begrenzung; gilt für Baseline + Zusatz"
     )
 with cp8:
-    fees = st.number_input("Gebühren [€/MWh] (Kauf/Verkauf)", min_value=0.0, value=0.0, step=0.1)
+    fees = ui_float("Gebühren [€/MWh] (Kauf/Verkauf)", 0.0, min_value=0.0, key="fees")", min_value=0.0, value=0.0, step=0.1)
 with cp9:
     enable_eeg = st.checkbox("EEG-Vergütung aktiv", value=True,
                              help="Wenn aktiv: PV-Einspeisewert je Slot = 0 bei negativen Preisen, sonst max(EEG, Day-Ahead)")
-    eeg_tariff = st.number_input("EEG-Vergütungssatz [€/MWh]", min_value=0.0, value=80.0, step=1.0)
+    eeg_tariff = ui_float("EEG-Vergütungssatz [€/MWh]", 80.0, min_value=0.0, key="eeg_tariff")
 
 cp10, cp11 = st.columns(2)
 with cp10:
@@ -190,11 +251,11 @@ with st.expander("🎲 Prognoseunsicherheit (Monte-Carlo)"):
     uncertainty_analysis = st.checkbox("Unsicherheitsanalyse aktivieren", value=False)
     colu1, colu2, colu3 = st.columns(3)
     with colu1:
-        n_scenarios = st.number_input("Szenarien [#]", min_value=2, value=50, step=1, disabled=not uncertainty_analysis)
+        n_scenarios = ui_int("Szenarien [#]", 50, min_value=2, key="n_scenarios", disabled=not uncertainty_analysis)
     with colu2:
-        pv_uncertainty = st.number_input("PV-Prognosefehler σ [%]", min_value=0.0, value=10.0, step=0.5, disabled=not uncertainty_analysis)
+        pv_uncertainty = ui_float("PV-Prognosefehler σ [%]", 10.0, min_value=0.0, key="pv_sigma", disabled=not uncertainty_analysis)
     with colu3:
-        price_uncertainty = st.number_input("Preis-Prognosefehler σ [%]", min_value=0.0, value=20.0, step=0.5, disabled=not uncertainty_analysis)
+        price_uncertainty = ui_float("Preis-Prognosefehler σ [%]", 20.0, min_value=0.0, key="price_sigma", disabled=not uncertainty_analysis)
     correlation = st.slider("Korrelation PV↔Preis", min_value=-1.0, max_value=1.0, value=-0.2, step=0.05, disabled=not uncertainty_analysis)
 
 def generate_uncertainty_scenarios(df: pd.DataFrame, n_scenarios: int,
@@ -312,7 +373,7 @@ else:
         st.stop()
     DF = base.copy()
     DF["price_eur_per_mwh"] = pd.to_numeric(price["price_raw"], errors="coerce").values
-    dt_h = st.number_input("Zeitschrittlänge [h]", min_value=0.01, max_value=24.0, value=0.25, step=0.01)
+    dt_h = ui_float("Zeitschrittlänge [h]", 0.25, min_value=0.01, max_value=24.0, key="dt_h")
 
 if len(DF) > 8760:
     st.warning(f"⚠️ Große Datenmenge ({len(DF)} Zeitschritte) – Optimierung kann dauern")
