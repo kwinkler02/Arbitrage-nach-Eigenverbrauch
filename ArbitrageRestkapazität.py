@@ -23,7 +23,7 @@ st.title("⚡ BESS-Arbitrage mit PV-First-Strategie & intelligenter Restkapazit�
 cu1, cu2 = st.columns(2)
 with cu1:
     base_file = st.file_uploader(
-        "Basistabelle (SoC_kWh, Netload_base_kW, BESS_busy_kW, PV_generation_kW, optional Zeit)",
+        "Basistabelle (SoC_kWh, Netload_base_kW, BESS_busy_kW, optional PV_generation_kW, optional Zeit)",
         type=["xlsx","xls","csv"], key="base")
 with cu2:
     price_file = st.file_uploader("Day-Ahead-Preise (Zeit, Preis)", type=["xlsx","xls","csv"], key="price")
@@ -66,6 +66,16 @@ def guess(colnames: List[str], keys: List[str]):
 # Zeitstempel-Erkennung in Basistabelle
 has_time_in_base = any(k in " ".join([c.lower() for c in base_cols]) for k in ["zeit","time","date","timestamp"])
 
+# NEU: Moduswahl – PV separat oder in Netzlast saldiert?
+pv_in_netload = st.checkbox(
+    "Keine separate PV-Spalte (PV bereits in Netzlast saldiert)",
+    value=True,
+    help=(
+        "Aktivieren, wenn es KEINE eigene PV-Spalte gibt. Dann wird der PV-Überschuss aus der negativen Netzlast "
+        "(inkl. BESS_busy) hergeleitet: pv_surplus = max(0, -(netload_base + bess_busy))."
+    )
+)
+
 b_time = None
 if has_time_in_base:
     guess_btime = guess(base_cols,["zeit","time","date"]) if base_cols else None
@@ -81,8 +91,13 @@ b_nload = st.selectbox("Basistabelle: belegte Netzleistung [kW] (±)", base_cols
                        index=base_cols.index(guess(base_cols,["net","last","grid","anschluss"])) if guess(base_cols,["net","last","grid","anschluss"]) else 0)
 b_busyP = st.selectbox("Basistabelle: BESS_busy_kW (±)", base_cols,
                        index=base_cols.index(guess(base_cols,["bess","busy","lade","entlade","power"])) if guess(base_cols,["bess","busy","lade","entlade","power"]) else 0)
-b_pv    = st.selectbox("Basistabelle: PV_generation_kW (+)", base_cols,
-                       index=base_cols.index(guess(base_cols,["pv","solar","generation","erzeugung"])) if guess(base_cols,["pv","solar","generation","erzeugung"]) else 0)
+
+# PV-Spalte nur abfragen, wenn nicht in Netzlast saldiert
+if not pv_in_netload:
+    b_pv = st.selectbox("Basistabelle: PV_generation_kW (+)", base_cols,
+                        index=base_cols.index(guess(base_cols,["pv","solar","generation","erzeugung"])) if guess(base_cols,["pv","solar","generation","erzeugung"]) else 0)
+else:
+    b_pv = None
 
 p_time = st.selectbox("Preise: Zeitstempel", price_cols,
                       index=price_cols.index(guess(price_cols,["zeit","time","date"])) if guess(price_cols,["zeit","time","date"]) else 0)
@@ -195,7 +210,11 @@ def generate_uncertainty_scenarios(df: pd.DataFrame, n_scenarios: int,
         pv_errors = errors[:, 0] / 100.0
         price_errors = errors[:, 1] / 100.0
         scenario_df = df.copy()
-        scenario_df["pv_generation_kw"] = np.maximum(0.0, df["pv_generation_kw"] * (1.0 + pv_errors))
+        # Bei saldierter PV gibt es keine PV-Generation, aber pv_surplus_inferred_kw bleibt gültig
+        if "pv_generation_kw" in df.columns:
+            scenario_df["pv_generation_kw"] = np.maximum(0.0, df.get("pv_generation_kw", 0.0) * (1.0 + pv_errors))
+        if "pv_surplus_inferred_kw" in df.columns:
+            scenario_df["pv_surplus_inferred_kw"] = np.maximum(0.0, df["pv_surplus_inferred_kw"] * (1.0 + pv_errors))
         scenario_df["price_eur_per_mwh"] = df["price_eur_per_mwh"] * (1.0 + price_errors)
         scenarios.append(scenario_df)
     return scenarios
@@ -204,11 +223,18 @@ def generate_uncertainty_scenarios(df: pd.DataFrame, n_scenarios: int,
 # ---------------------- Datenaufbereitung --------------------
 # =============================================================
 # Basistabelle
-cols = [b_soc, b_nload, b_busyP, b_pv]
+cols = [b_soc, b_nload, b_busyP]
+if not pv_in_netload and b_pv is not None:
+    cols.append(b_pv)
 if b_time:
     cols = [b_time] + cols
 base = base_raw[cols].copy()
-base.columns = (["ts"] if b_time else []) + ["soc_base_kwh","netload_base_kw","bess_busy_kw","pv_generation_kw"]
+expected_names = ["soc_base_kwh","netload_base_kw","bess_busy_kw"] + ([] if pv_in_netload else ["pv_generation_kw"])
+base.columns = (["ts"] if b_time else []) + expected_names
+
+# Wenn PV saldiert ist, Platzhalter-Spalte anlegen (für Kompatibilität)
+if pv_in_netload:
+    base["pv_generation_kw"] = 0.0
 
 # Datenvalidierung und -bereinigung
 try:
@@ -222,7 +248,7 @@ try:
     base["soc_base_kwh"]      = pd.to_numeric(base["soc_base_kwh"], errors="coerce").fillna(0.0)
     base["netload_base_kw"]   = pd.to_numeric(base["netload_base_kw"], errors="coerce").fillna(0.0)
     base["bess_busy_kw"]      = pd.to_numeric(base["bess_busy_kw"], errors="coerce").fillna(0.0)
-    base["pv_generation_kw"]  = pd.to_numeric(base["pv_generation_kw"], errors="coerce").fillna(0.0)
+    base["pv_generation_kw"]  = pd.to_numeric(base.get("pv_generation_kw", 0.0), errors="coerce").fillna(0.0)
 
     if (base["soc_base_kwh"] > E_max).any():
         st.error("❌ SoC_baseline übersteigt E_max in manchen Slots!")
@@ -295,6 +321,11 @@ if len(DF) > 8760:
 DF["e_dis_base_kwh"] = np.maximum(DF["bess_busy_kw"], 0.0) * dt_h
 DF["e_ch_base_kwh"]  = np.maximum(-DF["bess_busy_kw"], 0.0) * dt_h
 
+# NEU: PV-Überschuss vorab herleiten, falls PV in Netzlast saldiert ist
+if pv_in_netload:
+    DF["base_net_kw"] = DF["netload_base_kw"] + DF["bess_busy_kw"]
+    DF["pv_surplus_inferred_kw"] = np.maximum(0.0, -DF["base_net_kw"])  # Export => verfügbarer PV-Überschuss
+
 # Zyklenlimit-Vorprüfung
 if cycles_cap and cycles_cap > 0 and E_max > 0:
     base_cycles_total = DF["e_dis_base_kwh"].sum() / E_max
@@ -333,13 +364,17 @@ def optimize_bess_pv_first(df: pd.DataFrame,
     dis     = pulp.LpVariable.dicts("dis_kw", range(n), lowBound=0)
     soc     = pulp.LpVariable.dicts("soc_extra_kwh", range(n), lowBound=0)
 
-    # PV-Überschuss
+    # PV-Überschuss je Slot bestimmen
     pv_surplus = []
+    use_inferred = "pv_surplus_inferred_kw" in df.columns
     for i in range(n):
-        pv_gen = float(df.loc[i, "pv_generation_kw"])  # >=0
-        consumption_base = abs(min(0.0, float(df.loc[i, "netload_base_kw"])))  # nur Bezug
-        bess_busy_consumption = abs(min(0.0, float(df.loc[i, "bess_busy_kw"])))
-        surplus = max(0.0, pv_gen - consumption_base - bess_busy_consumption)
+        if use_inferred:
+            surplus = max(0.0, float(df.loc[i, "pv_surplus_inferred_kw"]))
+        else:
+            pv_gen = float(df.loc[i, "pv_generation_kw"])  # >=0
+            consumption_base = abs(min(0.0, float(df.loc[i, "netload_base_kw"])))  # nur Bezug
+            bess_busy_consumption = abs(min(0.0, float(df.loc[i, "bess_busy_kw"])))
+            surplus = max(0.0, pv_gen - consumption_base - bess_busy_consumption)
         pv_surplus.append(surplus)
 
     # Zielfunktion
@@ -704,7 +739,7 @@ with_bess_eeg_export_eur = (result["eeg_feed_in_value_eur_mwh"] * result["pv_sur
 # Netto-Erlös ggü. EEG-Baseline
 net_uplift_vs_eeg_eur = (revenue_sell_pv_eur - eeg_loss_eur) + (revenue_sell_grid_eur - cost_buy_grid_eur)
 
-# >>> NEU: Prozent-KPIs ggü. EEG-Baseline (0-Schutz) <<<
+# Prozent-KPIs ggü. EEG-Baseline (0-Schutz)
 if baseline_eeg_export_eur > 0:
     eeg_loss_pct_baseline = 100.0 * eeg_loss_eur / baseline_eeg_export_eur
     eeg_export_reduction_pct = 100.0 * (baseline_eeg_export_eur - with_bess_eeg_export_eur) / baseline_eeg_export_eur
@@ -806,12 +841,10 @@ ee1, ee2, ee3, ee4 = st.columns(4)
 with ee1:
     st.metric("EEG-Verlust durch BESS", f"{eeg_loss_eur:,.0f} €")
     st.metric("EEG-Export ohne BESS (Baseline)", f"{baseline_eeg_export_eur:,.0f} €")
-    # NEU
     st.metric("EEG-Verlust [% von EEG-Baseline]", f"{eeg_loss_pct_baseline:.1f}%")
 with ee2:
     st.metric("EEG-Export mit BESS", f"{with_bess_eeg_export_eur:,.0f} €")
     st.metric("Netto-Erlös ggü. EEG-Baseline", f"{net_uplift_vs_eeg_eur:,.0f} €")
-    # NEU
     st.metric("EEG-Export-Reduktion [%]", f"{eeg_export_reduction_pct:.1f}%")
 with ee3:
     st.metric("Ø EEG-Wert genutzte PV", f"{eeg_value_weighted:.1f} €/MWh")
@@ -820,7 +853,6 @@ with ee4:
     pv_dis_share = (result["e_dis_pv_kwh"].sum() / pv_kpis["e_dis_total"] * 100.0) if pv_kpis["e_dis_total"] > 0 else 0.0
     st.metric("Ø Entladepreis (PV-Anteil)", f"{avg_p_dis_pv:.1f} €/MWh")
     st.metric("PV-Anteil an Entladung", f"{pv_dis_share:.1f}%")
-    # NEU
     st.metric("Netto-Uplift ggü. EEG-Baseline [%]", f"{net_uplift_vs_eeg_pct:.1f}%")
 
 # Weitere Analysen
@@ -857,22 +889,6 @@ used_capacity_free = (result_free["p_ch_free_kw"].sum() + result_free["p_dis_fre
 capacity_utilization_total = (used_capacity_total / total_capacity * 100.0) if total_capacity > 0 else 0.0
 capacity_utilization_free = (used_capacity_free / total_capacity * 100.0) if total_capacity > 0 else 0.0
 
-# EEG-Infos (oben berechnet)
-
-col12, col13, col14, col15 = st.columns(4)
-with col12:
-    st.metric("⌀ Grid-Lade-Preis", f"{avg_price_charge_grid:.1f} €/MWh")
-    st.metric("⌀ Lade-Preis (frei)", f"{avg_price_charge_free:.1f} €/MWh")
-with col13:
-    st.metric("⌀ Entlade-Preis", f"{avg_price_discharge:.1f} €/MWh")
-    st.metric("⌀ Entlade-Preis (frei)", f"{avg_price_discharge_free:.1f} €/MWh")
-with col14:
-    st.metric("Max. Netzlast", f"{max_net_load:.1f} kW")
-    st.metric("Netz-Constraint", f"± {P_conn:.0f} kW")
-with col15:
-    st.metric("Grid-Preis-Spread", f"{price_spread:.1f} €/MWh")
-    st.metric("Preis-Spread (frei)", f"{price_spread_free:.1f} €/MWh")
-
 # =============================================================
 # ---------------------- Visualisierung -----------------------
 # =============================================================
@@ -895,21 +911,25 @@ price_chart = alt.Chart(plot_data).mark_line().encode(
     y=alt.Y("price_eur_per_mwh:Q", title="Preis [€/MWh]")
 ).properties(height=150, title="Day-Ahead Preise")
 
-# PV-Erzeugung und -Nutzung
+# PV-Erzeugung und -Nutzung (ohne pv_generation, wenn saldiert)
 id_col = "index" if "ts" not in plot_data.columns else "ts"
 x_axis_cat_or_time = f"{id_col}:O" if id_col == "index" else f"{id_col}:T"
 
-pv_data = plot_data[[id_col, "pv_generation_kw", "pv_surplus_available_kw", "pv_surplus_used_kw"]].melt(
+pv_series = ["pv_surplus_available_kw", "pv_surplus_used_kw"]
+if not pv_in_netload and "pv_generation_kw" in plot_data.columns:
+    pv_series = ["pv_generation_kw"] + pv_series
+
+pv_data = plot_data[[id_col] + pv_series].melt(
     id_vars=[id_col],
-    value_vars=["pv_generation_kw", "pv_surplus_available_kw", "pv_surplus_used_kw"],
+    value_vars=pv_series,
     var_name="Typ", value_name="Leistung"
 )
 
 pv_chart = alt.Chart(pv_data).mark_line().encode(
     x=alt.X(x_axis_cat_or_time, title="Zeit"),
-    y=alt.Y("Leistung:Q", title="PV-Leistung [kW]"),
-    color=alt.Color("Typ:N", legend=alt.Legend(title="PV-Daten"))
-).properties(height=200, title="PV-Erzeugung und -Nutzung")
+    y=alt.Y("Leistung:Q", title="PV/Überschuss [kW]"),
+    color=alt.Color("Typ:N", legend=alt.Legend(title="PV/Überschuss"))
+).properties(height=200, title="PV-Überschuss (hergeleitet) und -Nutzung")
 
 # BESS-Leistung
 power_data = plot_data[[id_col, "p_ch_pv_kw", "p_ch_grid_kw", "p_dis_kw"]].melt(
@@ -1015,7 +1035,7 @@ kpi_rows.append(("Netto-Erlös ggü. EEG-Baseline [€]", round(net_uplift_vs_ee
 kpi_rows.append(("Ø Entladepreis (PV-Anteil) [€/MWh]", round(avg_p_dis_pv, 1)))
 kpi_rows.append(("Break-even Entladepreis [€/MWh]", round(break_even_price_avg, 1)))
 
-# >>> NEU: Prozentwerte in den Excel-Export <<<
+# Prozentwerte in den Excel-Export
 kpi_rows.append(("EEG-Verlust [% von EEG-Baseline]", round(eeg_loss_pct_baseline, 1)))
 kpi_rows.append(("EEG-Export-Reduktion [%]", round(eeg_export_reduction_pct, 1)))
 kpi_rows.append(("Netto-Uplift ggü. EEG-Baseline [%]", round(net_uplift_vs_eeg_pct, 1)))
