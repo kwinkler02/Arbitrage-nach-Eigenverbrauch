@@ -1,6 +1,4 @@
-# app.py — BESS-Arbitrage (optimiert): PV-First + EEG + Restkapazität + KPIs + Export
 # -*- coding: utf-8 -*-
-
 from io import BytesIO
 from typing import Optional, List
 import numpy as np
@@ -66,7 +64,7 @@ def guess(colnames: List[str], keys: List[str]):
     return colnames[0] if colnames else None
 
 # Zeitstempel-Erkennung in Basistabelle
-has_time_in_base = any(k in " ".join([c.lower() for c in base_cols]) for k in ["zeit","time","date","timestamp"]) 
+has_time_in_base = any(k in " ".join([c.lower() for c in base_cols]) for k in ["zeit","time","date","timestamp"])
 
 b_time = None
 if has_time_in_base:
@@ -77,19 +75,19 @@ if has_time_in_base:
         index=(base_cols.index(guess_btime) + 1) if (guess_btime and guess_btime in base_cols) else 0
     )
 
-b_soc   = st.selectbox("Basistabelle: SoC_kWh (Baseline)", base_cols, 
-                      index=base_cols.index(guess(base_cols,["soc"])) if guess(base_cols,["soc"]) else 0)
-b_nload = st.selectbox("Basistabelle: belegte Netzleistung [kW] (±)", base_cols, 
-                      index=base_cols.index(guess(base_cols,["net","last","grid","anschluss"])) if guess(base_cols,["net","last","grid","anschluss"]) else 0)
-b_busyP = st.selectbox("Basistabelle: BESS_busy_kW (±)", base_cols, 
-                      index=base_cols.index(guess(base_cols,["bess","busy","lade","entlade","power"])) if guess(base_cols,["bess","busy","lade","entlade","power"]) else 0)
-b_pv    = st.selectbox("Basistabelle: PV_generation_kW (+)", base_cols, 
-                      index=base_cols.index(guess(base_cols,["pv","solar","generation","erzeugung"])) if guess(base_cols,["pv","solar","generation","erzeugung"]) else 0)
+b_soc   = st.selectbox("Basistabelle: SoC_kWh (Baseline)", base_cols,
+                       index=base_cols.index(guess(base_cols,["soc"])) if guess(base_cols,["soc"]) else 0)
+b_nload = st.selectbox("Basistabelle: belegte Netzleistung [kW] (±)", base_cols,
+                       index=base_cols.index(guess(base_cols,["net","last","grid","anschluss"])) if guess(base_cols,["net","last","grid","anschluss"]) else 0)
+b_busyP = st.selectbox("Basistabelle: BESS_busy_kW (±)", base_cols,
+                       index=base_cols.index(guess(base_cols,["bess","busy","lade","entlade","power"])) if guess(base_cols,["bess","busy","lade","entlade","power"]) else 0)
+b_pv    = st.selectbox("Basistabelle: PV_generation_kW (+)", base_cols,
+                       index=base_cols.index(guess(base_cols,["pv","solar","generation","erzeugung"])) if guess(base_cols,["pv","solar","generation","erzeugung"]) else 0)
 
-p_time = st.selectbox("Preise: Zeitstempel", price_cols, 
-                     index=price_cols.index(guess(price_cols,["zeit","time","date"])) if guess(price_cols,["zeit","time","date"]) else 0)
-p_val  = st.selectbox("Preise: Preis-Spalte", price_cols, 
-                     index=price_cols.index(guess(price_cols,["preis","price","eur","ct"])) if guess(price_cols,["preis","price","eur","ct"]) else 0)
+p_time = st.selectbox("Preise: Zeitstempel", price_cols,
+                      index=price_cols.index(guess(price_cols,["zeit","time","date"])) if guess(price_cols,["zeit","time","date"]) else 0)
+p_val  = st.selectbox("Preise: Preis-Spalte", price_cols,
+                      index=price_cols.index(guess(price_cols,["preis","price","eur","ct"])) if guess(price_cols,["preis","price","eur","ct"]) else 0)
 
 price_unit = st.radio("Preiseinheit", ["€/MWh","€/kWh","ct/kWh"], horizontal=True)
 
@@ -103,8 +101,8 @@ with cp1:
 with cp2:
     P_max = st.number_input("BESS P_max (sym) [kW]", min_value=0.1, value=100.0, step=1.0)
 with cp3:
-    P_conn = st.number_input("Netzanschluss P_conn [kW] (symmetrisch)", min_value=0.1, value=73.0, step=1.0, 
-                           help="Max. absolute Netzleistung |P| ≤ P_conn")
+    P_conn = st.number_input("Netzanschluss P_conn [kW] (symmetrisch)", min_value=0.1, value=73.0, step=1.0,
+                            help="Max. absolute Netzleistung |P| ≤ P_conn")
 
 if P_max > P_conn:
     st.warning("⚠️ BESS-Leistung > Netzanschluss - kann zu suboptimalen Lösungen führen")
@@ -133,8 +131,8 @@ with cp9:
 
 cp10, cp11 = st.columns(2)
 with cp10:
-    cycles_constraint = st.radio("Zyklen-Constraint", ["Obergrenze", "Exakte Ausnutzung", "Ignorieren"], 
-                                 horizontal=False,
+    cycles_constraint = st.radio("Zyklen-Constraint", ["Obergrenze", "Exakte Ausnutzung", "Ignorieren"],
+                                  horizontal=False,
                                  help="Obergrenze: ≤ Limit, Exakte Ausnutzung: = Limit")
 with cp11:
     ignore_busy = st.checkbox("BESS_busy ignorieren (nur Test)", value=False)
@@ -184,10 +182,9 @@ with st.expander("🎲 Prognoseunsicherheit (Monte-Carlo)"):
         price_uncertainty = st.number_input("Preis-Prognosefehler σ [%]", min_value=0.0, value=20.0, step=0.5, disabled=not uncertainty_analysis)
     correlation = st.slider("Korrelation PV↔Preis", min_value=-1.0, max_value=1.0, value=-0.2, step=0.05, disabled=not uncertainty_analysis)
 
-
-def generate_uncertainty_scenarios(df: pd.DataFrame, n_scenarios: int, 
-                                  pv_uncertainty: float, price_uncertainty: float, 
-                                  correlation: float) -> list:
+def generate_uncertainty_scenarios(df: pd.DataFrame, n_scenarios: int,
+                                   pv_uncertainty: float, price_uncertainty: float,
+                                   correlation: float) -> list:
     """Erzeugt korrelierte Störszenarien für PV und Preise."""
     scenarios = []
     n_points = len(df)
@@ -267,8 +264,8 @@ except Exception as e:
 # Join Preise
 if b_time:
     try:
-        DF = pd.merge_asof(base.sort_values("ts"), price.sort_values("ts"), 
-                           on="ts", direction="nearest", tolerance=pd.Timedelta("8min"))
+        DF = pd.merge_asof(base.sort_values("ts"), price.sort_values("ts"),
+                            on="ts", direction="nearest", tolerance=pd.Timedelta("8min"))
         if DF["price_eur_per_mwh"].isna().any():
             st.error("❌ Preiswerte konnten nicht gematcht werden. Bitte Zeitraster/Zeitzone prüfen.")
             st.stop()
@@ -428,8 +425,8 @@ def optimize_bess_pv_first(df: pd.DataFrame,
     result["e_dis_kwh"] = result["p_dis_kw"] * dt_h
 
     # Netzlast (ohne PV-Laden)
-    result["net_total_kw"] = (result["netload_base_kw"] + result["bess_busy_kw"] + 
-                              result["p_dis_kw"] - result["p_ch_grid_kw"])  # PV-Laden zählt nicht aufs Netz
+    result["net_total_kw"] = (result["netload_base_kw"] + result["bess_busy_kw"] +
+                               result["p_dis_kw"] - result["p_ch_grid_kw"])  # PV-Laden zählt nicht aufs Netz
 
     # Wirtschaftlichkeit
     result["revenue_arbitrage_eur"] = (
@@ -470,8 +467,8 @@ def optimize_free_trading(df: pd.DataFrame,
     soc = pulp.LpVariable.dicts("soc_free_kwh", range(n), lowBound=0, upBound=E_max)
 
     prob += pulp.lpSum(
-        ((float(df.loc[i,"price_eur_per_mwh"]) - fee_sell) * dis[i] - 
-         (float(df.loc[i,"price_eur_per_mwh"]) + fee_buy) * ch[i]) * (dt_h/1000.0)
+        ((float(df.loc[i,"price_eur_per_mwh"]) - fee_sell) * dis[i] -
+          (float(df.loc[i,"price_eur_per_mwh"]) + fee_buy) * ch[i]) * (dt_h/1000.0)
         for i in range(n)
     )
 
@@ -504,7 +501,7 @@ def optimize_free_trading(df: pd.DataFrame,
     result["e_dis_free_kwh"] = result["p_dis_free_kw"] * dt_h
     result["revenue_free_eur"] = (
         (result["price_eur_per_mwh"] - fee_sell) * result["e_dis_free_kwh"] - 
-        (result["price_eur_per_mwh"] + fee_buy) * result["e_ch_free_kwh"]
+         (result["price_eur_per_mwh"] + fee_buy) * result["e_ch_free_kwh"]
     ) / 1000.0
     return result
 
@@ -707,6 +704,16 @@ with_bess_eeg_export_eur = (result["eeg_feed_in_value_eur_mwh"] * result["pv_sur
 # Netto-Erlös ggü. EEG-Baseline
 net_uplift_vs_eeg_eur = (revenue_sell_pv_eur - eeg_loss_eur) + (revenue_sell_grid_eur - cost_buy_grid_eur)
 
+# >>> NEU: Prozent-KPIs ggü. EEG-Baseline (0-Schutz) <<<
+if baseline_eeg_export_eur > 0:
+    eeg_loss_pct_baseline = 100.0 * eeg_loss_eur / baseline_eeg_export_eur
+    eeg_export_reduction_pct = 100.0 * (baseline_eeg_export_eur - with_bess_eeg_export_eur) / baseline_eeg_export_eur
+    net_uplift_vs_eeg_pct = 100.0 * net_uplift_vs_eeg_eur / baseline_eeg_export_eur
+else:
+    eeg_loss_pct_baseline = 0.0
+    eeg_export_reduction_pct = 0.0
+    net_uplift_vs_eeg_pct = 0.0
+
 # Ø Entladepreis (nur PV-Anteil) und Break-even-Preis
 sum_dis_pv = float(result["e_dis_pv_kwh"].sum())
 avg_p_dis_pv = (
@@ -733,11 +740,11 @@ revenue_gap_pct = (revenue_gap_abs / revenue_free * 100.0) if revenue_free != 0 
 st.write("### 🎯 Hauptvergleich: PV-First vs. Freier Handel")
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.metric("Erlös (PV-First)", f"{pv_kpis['total_revenue']:,.0f} €", 
-             help="Mit PV-First-Strategie, Netz- und Eigenverbrauch-Constraints")
+    st.metric("Erlös (PV-First)", f"{pv_kpis['total_revenue']:,.0f} €",
+              help="Mit PV-First-Strategie, Netz- und Eigenverbrauch-Constraints")
 with col2:
-    st.metric("Erlös (freier Handel)", f"{revenue_free:,.0f} €", 
-             help="Nur Batterie-Parameter und Zyklenlimit")
+    st.metric("Erlös (freier Handel)", f"{revenue_free:,.0f} €",
+              help="Nur Batterie-Parameter und Zyklenlimit")
 with col3:
     st.metric("Verlust durch Constraints", f"-{revenue_gap_abs:,.0f} € ({revenue_gap_pct:.1f}%)",
              delta=f"{revenue_gap_pct:.1f}%", delta_color="inverse")
@@ -799,9 +806,13 @@ ee1, ee2, ee3, ee4 = st.columns(4)
 with ee1:
     st.metric("EEG-Verlust durch BESS", f"{eeg_loss_eur:,.0f} €")
     st.metric("EEG-Export ohne BESS (Baseline)", f"{baseline_eeg_export_eur:,.0f} €")
+    # NEU
+    st.metric("EEG-Verlust [% von EEG-Baseline]", f"{eeg_loss_pct_baseline:.1f}%")
 with ee2:
     st.metric("EEG-Export mit BESS", f"{with_bess_eeg_export_eur:,.0f} €")
     st.metric("Netto-Erlös ggü. EEG-Baseline", f"{net_uplift_vs_eeg_eur:,.0f} €")
+    # NEU
+    st.metric("EEG-Export-Reduktion [%]", f"{eeg_export_reduction_pct:.1f}%")
 with ee3:
     st.metric("Ø EEG-Wert genutzte PV", f"{eeg_value_weighted:.1f} €/MWh")
     st.metric("Break-even Entladepreis", f"{break_even_price_avg:.1f} €/MWh")
@@ -809,29 +820,27 @@ with ee4:
     pv_dis_share = (result["e_dis_pv_kwh"].sum() / pv_kpis["e_dis_total"] * 100.0) if pv_kpis["e_dis_total"] > 0 else 0.0
     st.metric("Ø Entladepreis (PV-Anteil)", f"{avg_p_dis_pv:.1f} €/MWh")
     st.metric("PV-Anteil an Entladung", f"{pv_dis_share:.1f}%")
+    # NEU
+    st.metric("Netto-Uplift ggü. EEG-Baseline [%]", f"{net_uplift_vs_eeg_pct:.1f}%")
 
 # Weitere Analysen
 st.write("### 🔍 Weitere Analysen")
 
 avg_price_charge_grid = (
     (result.loc[result["e_ch_grid_kwh"] > 0, "price_eur_per_mwh"] * result.loc[result["e_ch_grid_kwh"] > 0, "e_ch_grid_kwh"]).sum()
-    / pv_kpis['e_ch_grid_total'] if pv_kpis['e_ch_grid_total'] > 0 else 0.0
-)
+    / pv_kpis['e_ch_grid_total'] if pv_kpis['e_ch_grid_total'] > 0 else 0.0 )
 
 avg_price_charge_free = (
     (result_free.loc[result_free["e_ch_free_kwh"] > 0, "price_eur_per_mwh"] * result_free.loc[result_free["e_ch_free_kwh"] > 0, "e_ch_free_kwh"]).sum()
-    / energy_charged_free if energy_charged_free > 0 else 0.0
-)
+    / energy_charged_free if energy_charged_free > 0 else 0.0 )
 
 avg_price_discharge = (
     (result.loc[result["e_dis_kwh"] > 0, "price_eur_per_mwh"] * result.loc[result["e_dis_kwh"] > 0, "e_dis_kwh"]).sum()
-    / pv_kpis['e_dis_total'] if pv_kpis['e_dis_total'] > 0 else 0.0
-)
+    / pv_kpis['e_dis_total'] if pv_kpis['e_dis_total'] > 0 else 0.0 )
 
 avg_price_discharge_free = (
     (result_free.loc[result_free["e_dis_free_kwh"] > 0, "price_eur_per_mwh"] * result_free.loc[result_free["e_dis_free_kwh"] > 0, "e_dis_free_kwh"]).sum()
-    / energy_discharged_free if energy_discharged_free > 0 else 0.0
-)
+    / energy_discharged_free if energy_discharged_free > 0 else 0.0 )
 
 max_net_load = float(result["net_total_kw"].abs().max())
 
@@ -1005,6 +1014,11 @@ kpi_rows.append(("EEG-Export (mit BESS) [€]", round(with_bess_eeg_export_eur, 
 kpi_rows.append(("Netto-Erlös ggü. EEG-Baseline [€]", round(net_uplift_vs_eeg_eur, 2)))
 kpi_rows.append(("Ø Entladepreis (PV-Anteil) [€/MWh]", round(avg_p_dis_pv, 1)))
 kpi_rows.append(("Break-even Entladepreis [€/MWh]", round(break_even_price_avg, 1)))
+
+# >>> NEU: Prozentwerte in den Excel-Export <<<
+kpi_rows.append(("EEG-Verlust [% von EEG-Baseline]", round(eeg_loss_pct_baseline, 1)))
+kpi_rows.append(("EEG-Export-Reduktion [%]", round(eeg_export_reduction_pct, 1)))
+kpi_rows.append(("Netto-Uplift ggü. EEG-Baseline [%]", round(net_uplift_vs_eeg_pct, 1)))
 
 kpi_summary = pd.DataFrame(kpi_rows, columns=["Kennzahl","Wert"])
 
